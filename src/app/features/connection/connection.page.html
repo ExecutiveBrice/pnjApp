@@ -1,0 +1,88 @@
+<ion-content [fullscreen]="true">
+  <div class="connection-shell">
+    <header class="brand-bar">
+      <a class="wordmark" routerLink="/connection"
+        ><img src="assets/sigil.svg" alt="" />ÉCHO<span>COMPAGNON DE TABLE</span></a
+      ><ion-button fill="clear" routerLink="/settings" aria-label="Réglages"
+        ><ion-icon slot="icon-only" name="options-outline"
+      /></ion-button>
+    </header>
+    <main class="connection-main">
+      <div class="intro">
+        <div class="eyebrow"><span class="tiny-line"></span> L’AVENTURE COMMENCE PAR UNE VOIX</div>
+        <h1>Donnez la parole<br />à votre <em>univers.</em></h1>
+        <p>
+          Une rencontre. Une question. Une histoire qui prend vie.<br class="desktop-break" />
+          Connectez-vous à votre serveur pour entrer en scène.
+        </p>
+      </div>
+      <section class="connection-card" aria-labelledby="server-title">
+        <div class="card-heading">
+          <span class="icon-tile"><ion-icon name="radio-outline" /></span>
+          <div>
+            <h2 id="server-title">Rejoindre la table</h2>
+            <p>Connexion au serveur NPC</p>
+          </div>
+          <span class="protocol">V1</span>
+        </div>
+        <form (ngSubmit)="connect()">
+          <label for="host">Adresse du serveur</label>
+          <input
+            id="host"
+            name="host"
+            [(ngModel)]="host"
+            placeholder="192.168.1.20 ou ws://serveur:8766/ws"
+            autocomplete="url"
+            autocapitalize="off"
+            spellcheck="false"
+            [disabled]="busy"
+            required
+          />
+          <label for="port">Port</label>
+          <input
+            id="port"
+            name="port"
+            [(ngModel)]="port"
+            type="number"
+            inputmode="numeric"
+            min="1"
+            max="65535"
+            [disabled]="busy || host.startsWith('ws://') || host.startsWith('wss://')"
+            required
+          />
+          <p class="field-help">
+            Utilisez l’adresse IP locale du PC exécutant <code>npc</code>, sur le même réseau Wi-Fi.
+            Exemple : 192.168.1.20.
+          </p>
+          @if (error) {
+          <p class="inline-error" role="alert">{{ error }}</p>
+          }
+          <ion-button type="submit" expand="block" [disabled]="busy" class="connect-button"
+            >@if (busy) { <ion-spinner name="crescent" /> } @else { Entrer en scène
+            <ion-icon name="arrow-forward-outline" slot="end" /> }</ion-button
+          >
+          @if (busy) {
+          <div class="retry-row">
+            <app-connection-status [state]="state()" /><ion-button
+              fill="clear"
+              size="small"
+              (click)="ws.disconnect()"
+              >Annuler</ion-button
+            >
+          </div>
+          } @if (state() === 'disconnected') {
+          <div class="status-row">
+            <app-connection-status [state]="state()" /><span>En attente de votre serveur</span>
+          </div>
+          }
+        </form>
+      </section>
+      <p class="privacy-note">
+        <ion-icon name="shield-checkmark-outline" /> Votre aventure reste sur votre réseau local.
+      </p>
+    </main>
+    <footer class="connection-footer">
+      <span>UNE VOIX POUR CHAQUE RENCONTRE</span><span>CLIENT LÉGER · SANS CLOUD</span>
+    </footer>
+  </div>
+</ion-content>

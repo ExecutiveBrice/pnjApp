@@ -1,0 +1,94 @@
+<ion-header class="ion-no-border"
+  ><ion-toolbar
+    ><ion-buttons slot="start"
+      ><ion-button
+        [routerLink]="ws.connected ? '/conversation' : '/connection'"
+        aria-label="Retour"
+        class="back-button"
+        ><ion-icon slot="icon-only" name="arrow-back-outline" /></ion-button></ion-buttons
+    ><ion-title>Réglages</ion-title></ion-toolbar
+  ></ion-header
+>
+<ion-content>
+  <main class="settings-main">
+    <h1>À votre rythme.</h1>
+    <p class="lead">
+      Ajustez votre connexion et votre façon de jouer.<br />Vos préférences sont conservées sur cet
+      appareil.
+    </p>
+    <form (ngSubmit)="save()">
+      <h2>VOTRE TABLE</h2>
+      <section class="settings-card">
+        <label for="settings-host">Adresse du serveur</label
+        ><input
+          id="settings-host"
+          name="host"
+          [(ngModel)]="form.host"
+          placeholder="192.168.1.20 ou URL ws:// / wss://"
+          autocapitalize="off"
+          spellcheck="false"
+          autocomplete="url"
+        />
+        <label for="settings-port">Port</label
+        ><input
+          id="settings-port"
+          name="port"
+          [(ngModel)]="form.port"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="65535"
+          required
+        />
+        <p class="muted">
+          Sur téléphone, localhost désigne le téléphone. Utilisez l’IP du PC qui exécute npc. Un
+          changement d’adresse vous ramène à l’écran de connexion.
+        </p>
+      </section>
+      <h2>L’EXPÉRIENCE</h2>
+      <section class="settings-card">
+        <div class="toggle-row">
+          <ion-toggle name="reconnect" [(ngModel)]="form.autoReconnect" justify="space-between"
+            >Reconnexion automatique</ion-toggle
+          >
+          <p>Retrouver le serveur après une coupure réseau.</p>
+        </div>
+        <div class="toggle-row">
+          <ion-toggle name="autoplay" [(ngModel)]="form.autoPlayAudio" justify="space-between"
+            >Lecture automatique de la voix</ion-toggle
+          >
+          <p>
+            Lire les réponses dès qu’elles sont reçues. Un premier toucher peut être nécessaire.
+          </p>
+        </div>
+        <div class="toggle-row">
+          <ion-toggle name="transcript" [(ngModel)]="form.showTranscript" justify="space-between"
+            >Afficher la transcription</ion-toggle
+          >
+          <p>Garder le fil de vos échanges à l’écran.</p>
+        </div>
+      </section>
+      <h2>LA VOIX</h2>
+      <section class="settings-card">
+        <label for="volume"
+          >Volume de lecture <output>{{ (form.volume * 100).toFixed(0) }} %</output></label
+        ><input
+          id="volume"
+          class="volume"
+          name="volume"
+          [(ngModel)]="form.volume"
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+        />
+      </section>
+      @if (error) {
+      <p class="inline-error" role="alert">{{ error }}</p>
+      }
+      <ion-button type="submit" expand="block" class="save-button"
+        >Enregistrer les préférences</ion-button
+      >
+    </form>
+  </main>
+</ion-content>

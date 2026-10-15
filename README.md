@@ -1,0 +1,191 @@
+# Écho · Client mobile NPC
+
+Application Ionic 9 / Angular 22 standalone, TypeScript strict, Capacitor 8, RxJS et SCSS. Écho relie les joueurs au WebSocket du serveur `npc`, sans IA ni service cloud côté téléphone. Les ressources visuelles et les polices sont locales. Le client reste utilisable sur le réseau local sans accès Internet après installation.
+
+## Installation
+
+Node **24.15+** recommandé (Node 22.22.3+ également compatible avec Angular 22), npm récent.
+
+```bash
+npm install
+```
+
+Le registre officiel npm est défini dans `.npmrc` pour ne pas dépendre d’un registre d’entreprise. `package-lock.json` fige les versions effectivement installées.
+
+## Développement
+
+```bash
+npm start
+```
+
+Ouvrir <http://localhost:4200>. Le serveur Angular écoute sur toutes les interfaces pour permettre les essais LAN. Le premier écran demande l’adresse du PC qui exécute `npc` et son port, initialement `8766`. Une URL complète `ws://hote:8766/ws` ou `wss://hote/chemin` est aussi acceptée. Une URL complète conserve son port et son chemin ; si son chemin est vide, `/ws` est ajouté.
+
+Dans un deuxième terminal :
+
+```bash
+npm run mock-server
+```
+
+Dans l’application, entrer **localhost**, **8766**, puis « Entrer en scène ». Le PNJ vient du `hello`. Écrire **Bonjour !** : l’état passe à `processing`, les fragments enrichissent la même bulle, le texte final la remplace, puis l’état revient à `idle`.
+
+Le mock écoute `ws://0.0.0.0:8766/ws`, accessible dans le navigateur via `ws://localhost:8766/ws`. Il s’agit uniquement d’un outil de développement, pas d’un backend intermédiaire à déployer.
+
+Sur un téléphone, utiliser **l’IP locale du PC**, par exemple `192.168.1.20`, port `8766` : `localhost` désigne le téléphone. Les deux appareils doivent être sur le même réseau Wi-Fi ; le serveur réel doit écouter sur son interface LAN et le pare-feu du PC doit autoriser le port. Les réseaux invités peuvent isoler les appareils. L’émulateur Android peut joindre le PC via `10.0.2.2`.
+
+## Mock : options
+
+Par défaut, le mock annonce le texte et la sélection de PNJ. Les personnages de démonstration sont des **fixtures du mock seulement** ; aucun personnage n’est codé en dur dans le client.
+
+```bash
+# Accepter les enregistrements PCM, sans faire de reconnaissance vocale
+MOCK_AUDIO_INPUT=1 npm run mock-server
+
+# Générer un signal sonore PCM à 22050 Hz, pas une voix Piper
+MOCK_AUDIO_OUTPUT=1 npm run mock-server
+
+# Les deux fonctionnalités
+MOCK_AUDIO_INPUT=1 MOCK_AUDIO_OUTPUT=1 npm run mock-server
+
+# Compatibilité avec un ancien hello sans capabilities
+MOCK_LEGACY=1 npm run mock-server
+
+# Port différent, ou liste de PNJ personnalisée
+PORT=8767 npm run mock-server
+NPC_FIXTURES=./mes-pnj.json npm run mock-server
+```
+
+Format de `mes-pnj.json` : tableau de `{ "id": "identifiant-cote-serveur", "name": "Nom affiché" }` non vide. Arrêter le mock existant avant d’en lancer un autre sur le même port. Les commandes de variables d’environnement ci-dessus sont destinées à macOS/Linux ; sous PowerShell, utiliser par exemple `$env:MOCK_AUDIO_INPUT="1"`.
+
+## Build et vérifications
+
+```bash
+npm run build
+npm test
+npm run lint
+```
+
+Le build de production sort dans `www/`, directement utilisable par Capacitor. Les tests Vitest n’ont besoin ni de Chrome ni de périphérique audio. Le lint utilise ESLint et vérifie aussi les types des tests ; la compilation Angular vérifie les templates strictement. Les logs de développement n’incluent ni contenu de conversation ni buffers audio et sont désactivés en production, sauf les avertissements.
+
+## Android
+
+Installer Android Studio et les SDK/JDK requis par Capacitor 8. Le dépôt ne contient pas les projets natifs générés, pour garder la base lisible.
+
+```bash
+npx cap add android
+npm run build
+npx cap sync android
+# Remplacer l’adresse par l’IP du PC exécutant npc
+NPC_LAN_HOSTS=192.168.1.20,localhost,10.0.2.2 npm run native:configure
+# Autorise le contenu ws:// depuis l’origine https://localhost de la WebView
+NPC_LAN_DEV=1 npx cap sync android
+npx cap open android
+```
+
+Lancer ensuite une variante **debug** sur l’appareil ou l’émulateur.
+
+`native:configure` ajoute :
+
+- `android.permission.RECORD_AUDIO` dans `android/app/src/main/AndroidManifest.xml`. Capacitor demande l’autorisation au moment de `getUserMedia` ; l’utilisateur doit l’accepter.
+- `android/app/src/debug/AndroidManifest.xml`, qui référence `@xml/npc_network_security`.
+- `android/app/src/debug/res/xml/npc_network_security.xml` : politique de base interdisant le cleartext, avec exceptions **uniquement pour les hôtes fournis** par `NPC_LAN_HOSTS`. Aucun joker ni exception globale. Rerun la commande si l’IP du PC change. Une politique debug préexistante différente n’est pas écrasée : fusionner les `domain-config` manuellement.
+
+`NPC_LAN_DEV=1` active `android.allowMixedContent` dans la configuration copiée par `cap sync`. C’est nécessaire car les assets embarqués gardent une origine HTTPS, compatible microphone, tandis que le serveur LAN utilise `ws://`. La politique réseau Android reste limitée aux hôtes listés et à la variante debug. `server.cleartext` et les certificats TLS ne sont pas modifiés.
+
+Pour une distribution/release, utiliser un serveur **wss:// avec certificat valide** puis lancer `npx cap sync android` **sans** `NPC_LAN_DEV`. La politique debug n’est pas incluse dans une release. La configuration ne permet pas un `ws://` arbitraire sur tous les réseaux.
+
+## iOS
+
+macOS, Xcode et les outils requis par Capacitor 8 sont nécessaires. La signature d’un appareil se configure dans Xcode.
+
+```bash
+npx cap add ios
+npm run build
+npx cap sync ios
+npm run native:configure
+npx cap open ios
+```
+
+Sur macOS, `native:configure` utilise l’outil Apple `PlistBuddy` pour ajouter ces clés à `ios/App/App/Info.plist` de façon idempotente, sans remplacer les autres réglages :
+
+```xml
+<key>NSMicrophoneUsageDescription</key>
+<string>Votre voix est envoyée au serveur NPC de votre table de jeu.</string>
+<key>NSLocalNetworkUsageDescription</key>
+<string>Écho rejoint le serveur NPC sur votre réseau local.</string>
+<key>NSAppTransportSecurity</key>
+<dict>
+  <key>NSAllowsLocalNetworking</key>
+  <true/>
+</dict>
+```
+
+Autoriser le micro et le réseau local lors des demandes iOS. `NSAllowsLocalNetworking` permet le réseau local (IP, noms locaux) sans ajouter `NSAllowsArbitraryLoads` ni désactiver globalement ATS. Pour un nom public ou un serveur distant, utiliser `wss://`. Les modifications restent dans les projets natifs générés ; les conserver dans votre dépôt si vous décidez ensuite de versionner `android/` ou `ios/` (retirer alors les lignes correspondantes de `.gitignore`).
+
+## Microphone et limites de cette première version
+
+- `MicrophoneService` utilise `getUserMedia` et `MediaRecorder` : Opus/WebM si disponible, MP4 sur les appareils qui le demandent, puis le format par défaut. Au relâchement, Web Audio décode le fichier complet, mixe les canaux en mono, rééchantillonne en **16000 Hz** et encode en **PCM signé 16 bits little endian**. Aucun moteur de transcription ne tourne sur le téléphone.
+- L’appui maintenu capture localement ; le relâchement envoie `audio_input_start`, les frames binaires de 32 Kio maximum, puis `audio_input_end`. Le flux micro n’est donc **pas encore envoyé en temps réel**. Ce choix évite une dépendance native ou audio supplémentaire ; la capture est isolée pour pouvoir être remplacée ultérieurement.
+- Le micro reste désactivé sans `capabilities.audio_input: true`. Pas d’envoi audio expérimental à un ancien serveur. Un refus serveur apparaît dans un Toast et la connexion reste utilisable.
+- Capture limitée à **60 secondes**. Glisser hors du bouton annule. Le clavier (Espace/Entrée), la perte de focus, le passage en arrière-plan, la navigation et la déconnexion sont gérés. Une autorisation qui arrive après le relâchement ferme aussitôt les pistes. Au premier usage, maintenir le bouton après l’autorisation ou recommencer l’appui.
+- Dans un navigateur, le micro exige **localhost ou HTTPS**. `http://192.168.x.x:4200` permet de tester le texte sur téléphone mais n’offre généralement pas `getUserMedia`. Une page HTTPS bloque habituellement `ws://` : utiliser `wss://` dans ce cas, ou l’application native configurée pour le LAN.
+- Les WebViews récentes Android/iOS doivent fournir MediaRecorder et un décodeur pour le format qu’elles enregistrent. En cas d’API, d’autorisation ou de codec indisponible, un message explique l’erreur et la saisie texte reste disponible si le serveur l’autorise. La capture et la lecture en arrière-plan ne sont pas prises en charge.
+- Le rééchantillonnage moyenne les échantillons dans chaque intervalle (suffisant pour cette V1 vocale), sans filtre haute fidélité spécialisé.
+
+## Lecture de la voix
+
+`AudioPlaybackService` reçoit `audio_start`, les frames binaires et `audio_end`. Il assemble les octets, y compris lorsqu’une frame coupe un échantillon en deux, puis convertit `int16 / 32768` en Float32. Le `AudioBuffer` utilise **le sample_rate fourni par le serveur**, jamais une fréquence codée en dur. Mono / `pcm_s16le` uniquement ; les formats non conformes sont ignorés avec avertissement.
+
+La V1 attend `audio_end` avant de lire. Les réponses sont mises en file et jouées séquentiellement ; la lecture réellement streaming pourra se concentrer dans ce service. Le tampon courant est limité à 32 Mio et la file à quatre réponses. Sans geste utilisateur préalable, ou si la lecture automatique est désactivée, le bouton **Écouter la réponse** permet de lancer la lecture. Le réglage de volume agit sur un `GainNode`.
+
+Pendant `speaking` ou une lecture locale, appuyer sur le micro envoie d’abord `stop_speaking`, arrête et vide l’audio local, puis demande le micro. L’arrêt, le changement de PNJ et la déconnexion invalident aussi les lectures en attente. Le protocole n’ayant pas d’identifiant de tour, le serveur doit cesser de produire l’ancienne réponse après `stop_speaking` ; un nouvel `audio_start` est considéré comme une nouvelle réponse.
+
+Le mock sonore valide le transport PCM, **pas l’intelligibilité d’une voix Piper**. La lecture d’un vrai flux Piper et les permissions sur appareils physiques Android/iOS restent à valider avec votre serveur et vos appareils.
+
+## Protocole et état
+
+- WebSocket natif exclusivement dans `NpcWebSocketService`, `binaryType = 'arraybuffer'`, envoi et réception JSON typés. Les JSON invalides, types inconnus et champs invalides sont ignorés sans couper la connexion.
+- Attente de `hello` avant d’exposer `connected` ou d’envoyer des commandes ; timeout de 10 s. Seul `protocol: 1` est accepté ; une autre version affiche une erreur et arrête la reconnexion.
+- Capacités absentes : texte oui, entrée audio non, sortie audio non, sélection PNJ non. Les sorties PCM reçues restent lisibles même avec un ancien `hello`. Les fonctions d’entrée et de sélection sont conditionnées aux capacités.
+- `say`, `switch_npc`, `stop_speaking`, `status`, états et événements texte/audio du cahier des charges sont implémentés. `status` est demandé après chaque `hello`.
+- Reconnexion après 1, 2, 5, 10 puis 10 secondes ; attente d’un nouveau `hello`, réinitialisation des capacités et de la liste. L’arrêt explicite ou la désactivation du réglage interrompt les tentatives.
+- La modal utilise `npc_list`. En l’absence de liste, un identifiant fourni par le MJ peut être saisi si `npc_switch` est autorisé. Le nom actif change à réception de `npc_switched`.
+- Historique limité aux 500 dernières bulles en mémoire, sans persistance des conversations. Ajout immédiat du texte joueur, dédoublonnage de son écho `player_spoke`, puis concaténation des chunks PNJ dans une bulle. Une réponse finale sans chunks est également acceptée.
+- `SettingsService` encapsule `localStorage` et valide les préférences relues. Adresse, port, reconnexion, lecture automatique, transcription et volume y sont stockés. L’interface continue de fonctionner si le stockage est indisponible et informe de l’échec de sauvegarde.
+
+## Organisation
+
+```text
+src/app/
+  core/
+    models/protocol.ts              Types discriminés et validation à réception
+    services/
+      npc-websocket.service.ts     Transport, handshake, capacités, reconnexion
+      conversation.store.ts        Historique et réponses progressives
+      audio-playback.service.ts    Tampons PCM, file, volume, interruption
+      microphone.service.ts        Capture locale, décodage et PCM 16 kHz
+      settings.service.ts          Préférences locales
+    guards/connection.guard.ts     Accès à la conversation après hello
+  features/
+    connection/                    Adresse et connexion au serveur
+    conversation/                  PNJ actif, bulles, voix et modal de sélection
+    settings/                      Préférences utilisateur
+  shared/
+    components/                    Push-to-talk et statut de connexion
+    utils/                         Endpoint, conversions PCM et logger
+  app.component.ts                 Routage après connexion/coupure et Toasts
+  app.routes.ts                    Routes chargées à la demande
+src/assets/                        Avatar et emblème SVG locaux
+scripts/mock-npc-server.mjs         Mock facultatif (seule dépendance : ws)
+scripts/configure-native.mjs        Permissions natives et exceptions LAN ciblées
+```
+
+Tous les composants de l’application sont standalone ; `FormsModule` est utilisé uniquement pour les directives de formulaires Angular. Avec Ionic 9, les composants standalone s’importent depuis `@ionic/angular` (le sous-chemin `/standalone` d’Ionic 8 a été supprimé).
+
+## Références vérifiées
+
+- [Compatibilité Angular / Node / TypeScript](https://angular.dev/reference/versions)
+- [Ionic 9 : imports standalone et compatibilité Angular](https://ionic.io/blog/announcing-ionic-framework-9)
+- [Configuration Capacitor](https://capacitorjs.com/docs/config)
+- [MDN : getUserMedia et contextes sécurisés](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)
+- [MDN : frames binaires WebSocket](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/binaryType)
+- [Apple : NSAllowsLocalNetworking](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking)

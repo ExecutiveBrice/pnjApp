@@ -1,0 +1,48 @@
+{
+  "name": "pnj-echo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "ng serve --host 0.0.0.0",
+    "build": "ng build",
+    "test": "vitest run",
+    "lint": "eslint . && tsc --noEmit -p tsconfig.spec.json",
+    "mock-server": "node scripts/mock-npc-server.mjs",
+    "native:configure": "node scripts/configure-native.mjs"
+  },
+  "engines": {
+    "node": "^22.22.3 || >=24.15.0"
+  },
+  "dependencies": {
+    "@angular/common": "22.2.3",
+    "@angular/compiler": "22.2.3",
+    "@angular/core": "22.2.3",
+    "@angular/forms": "22.2.3",
+    "@angular/platform-browser": "22.2.3",
+    "@angular/router": "22.2.3",
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3",
+    "@ionic/angular": "9.0.8",
+    "ionicons": "^8.0.13",
+    "rxjs": "~7.8.2",
+    "tslib": "^2.8.1",
+    "zone.js": "~0.16.0"
+  },
+  "devDependencies": {
+    "@angular/build": "22.2.2",
+    "@angular/cli": "22.2.2",
+    "@angular/compiler-cli": "22.2.3",
+    "@capacitor/cli": "8.5.3",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "eslint": "^10.12.0",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.57.0",
+    "vitest": "^4.0.8",
+    "ws": "^8.18.3"
+  }
+}

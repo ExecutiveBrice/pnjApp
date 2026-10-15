@@ -1,0 +1,9 @@
+node_modules/
+www/
+.angular/
+coverage/
+.idea/
+.DS_Store
+android/
+ios/
+*.log
