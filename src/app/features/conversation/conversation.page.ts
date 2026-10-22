@@ -31,6 +31,7 @@ import { SettingsService } from '../../core/services/settings.service';
 import { PushToTalkComponent } from '../../shared/components/push-to-talk.component';
 import { ConnectionStatusComponent } from '../../shared/components/connection-status.component';
 import { NpcPickerComponent } from './npc-picker.component';
+import { SecretApprovalsComponent } from './secret-approvals.component';
 
 @Component({
   selector: 'app-conversation',
@@ -48,6 +49,7 @@ import { NpcPickerComponent } from './npc-picker.component';
     IonToolbar,
     PushToTalkComponent,
     ConnectionStatusComponent,
+    SecretApprovalsComponent,
   ],
   templateUrl: './conversation.page.html',
   styleUrl: './conversation.page.scss',
@@ -61,12 +63,23 @@ export class ConversationPage {
   private readonly modal = inject(ModalController);
   private readonly toast = inject(ToastController);
   readonly npc = toSignal(this.ws.npc$, { initialValue: '' });
+  readonly npcs = toSignal(this.ws.npcs$, { initialValue: [] });
+  readonly selectedNpc = computed(() =>
+    this.npcs().find((character) => character.id === this.npc() || character.name === this.npc()),
+  );
+  readonly npcName = computed(() => this.selectedNpc()?.name || this.npc());
   readonly connection = toSignal(this.ws.connectionState$, { initialValue: this.ws.state });
   readonly npcState = toSignal(this.ws.npcState$, { initialValue: 'idle' });
   readonly capabilities = toSignal(this.ws.capabilities$, {
     initialValue: this.ws.currentCapabilities,
   });
   readonly messages = toSignal(this.ws.messages$, { initialValue: [] });
+  readonly disclosures = toSignal(this.ws.disclosures$, { initialValue: [] });
+  readonly pendingDisclosures = computed(
+    () =>
+      this.disclosures().filter((item) => item.status === 'pending' || item.status === 'sending')
+        .length,
+  );
   readonly settings = toSignal(this.settingsService.settings$, {
     initialValue: this.settingsService.value,
   });
@@ -74,6 +87,15 @@ export class ConversationPage {
   readonly speaking = toSignal(this.audio.speaking$, { initialValue: false });
   readonly pendingAudio = toSignal(this.audio.pending$, { initialValue: false });
   readonly converting = signal(false);
+  readonly reviewingDisclosures = signal(false);
+  readonly microphoneDisabledReason = computed(() => {
+    if (this.connection() !== 'connected') return 'Connectez-vous au serveur pour parler.';
+    if (!this.microphone.available)
+      return 'La capture micro n’est pas prise en charge sur cet appareil.';
+    if (!this.capabilities().audio_input)
+      return 'Le serveur n’a pas activé l’entrée vocale. Vérifiez sa configuration puis reconnectez-vous.';
+    return '';
+  });
   readonly visualState = computed(() =>
     this.recording()
       ? 'recording'
@@ -107,7 +129,7 @@ export class ConversationPage {
       volumeHighOutline,
     });
     this.ws.messages$.pipe(takeUntilDestroyed(inject(DestroyRef))).subscribe(() => {
-      if (this.active)
+      if (this.active && !this.reviewingDisclosures())
         requestAnimationFrame(() => {
           void this.content?.scrollToBottom(180);
         });
@@ -115,7 +137,13 @@ export class ConversationPage {
   }
   ionViewDidEnter(): void {
     this.active = true;
-    void this.content?.scrollToBottom(0);
+    if (this.pendingDisclosures()) this.showDisclosures();
+    else void this.content?.scrollToBottom(0);
+  }
+  showDisclosures(): void {
+    this.cancelRecording();
+    this.reviewingDisclosures.set(true);
+    requestAnimationFrame(() => void this.content?.scrollToTop(180));
   }
   ionViewWillLeave(): void {
     this.active = false;

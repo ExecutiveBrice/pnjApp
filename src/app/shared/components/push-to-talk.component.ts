@@ -50,13 +50,15 @@ import { NpcState } from '../../core/models/protocol';
       />
     </button>
     <strong>{{ label }}</strong>
+    @if (disabled) {
+    <p class="disabled-reason" role="status">{{ disabledReason }}</p>
+    } @else {
     <span>{{
       holding
         ? 'Relâchez pour envoyer · Glissez pour annuler'
-        : disabled
-          ? 'La saisie texte reste disponible si autorisée'
-          : 'Votre voix, de l’autre côté de la table'
+        : 'Votre voix, de l’autre côté de la table'
     }}</span>
+    }
   </div>`,
   styles: [
     `
@@ -98,9 +100,14 @@ import { NpcState } from '../../core/models/protocol';
         font-weight: 600;
         margin-top: 8px;
       }
-      .ptt span {
+      .ptt span,
+      .disabled-reason {
         font-size: 11px;
         color: var(--muted);
+      }
+      .disabled-reason {
+        margin: 0;
+        max-width: 340px;
       }
       [data-state='recording'] .ptt-button {
         background: #df8779;
@@ -154,6 +161,7 @@ import { NpcState } from '../../core/models/protocol';
 export class PushToTalkComponent implements OnChanges, OnDestroy {
   @Input() state: NpcState = 'idle';
   @Input() disabled = false;
+  @Input() disabledReason = 'La saisie texte reste disponible si autorisée';
   @Input() npc = 'Le personnage';
   @Output() pressed = new EventEmitter<void>();
   @Output() released = new EventEmitter<void>();

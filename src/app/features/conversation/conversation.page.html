@@ -1,34 +1,51 @@
 <ion-header class="ion-no-border"
   ><ion-toolbar>
     <div class="conversation-brand" slot="start">
-      <img src="assets/sigil.svg" alt="" /><span>ÉCHO<small>LA RENCONTRE</small></span>
+      <img src="assets/sigil.svg" alt="" /><span>ÉCHO<small>MAÎTRE DU JEU</small></span>
     </div>
-    <ion-buttons slot="end"
-      ><ion-button routerLink="/settings" aria-label="Réglages"
+    <ion-buttons slot="end">
+      @if (capabilities().secret_approval) {
+      <ion-button
+        class="secrets-button"
+        (click)="showDisclosures()"
+        [attr.aria-label]="pendingDisclosures() + ' divulgations en attente, ouvrir les validations'"
+        >Secrets · {{ pendingDisclosures() }}</ion-button
+      >
+      }
+      <ion-button routerLink="/settings" aria-label="Réglages"
         ><ion-icon slot="icon-only" name="options-outline" /></ion-button
       ><ion-button (click)="ws.disconnect()" aria-label="Se déconnecter"
         ><ion-icon slot="icon-only" name="power-outline" /></ion-button
-    ></ion-buttons> </ion-toolbar
-></ion-header>
+    ></ion-buttons>
+  </ion-toolbar>
+  <ion-toolbar class="character-toolbar">
+    <button
+      type="button"
+      class="character"
+      [disabled]="!capabilities().npc_switch"
+      [attr.aria-label]="capabilities().npc_switch ? 'Changer de personnage : ' + npcName() : npcName()"
+      [attr.aria-haspopup]="capabilities().npc_switch ? 'dialog' : null"
+      (click)="selectNpc()"
+    >
+      <span class="portrait" [class.talking]="visualState() === 'speaking'">
+        <img src="assets/avatar.svg" alt="" />
+      </span>
+      <span class="character-info">
+        <span class="character-name">{{ npcName() }}</span>
+        <span class="character-summary">{{ selectedNpc()?.description || 'PNJ sélectionné' }}</span>
+        <span class="character-state" role="status">
+          <span [attr.data-state]="visualState()"></span>{{ stateLabel() }}
+        </span>
+      </span>
+      @if (capabilities().npc_switch) {
+      <ion-icon class="character-chevron" name="chevron-down-outline" aria-hidden="true" />
+      }
+    </button>
+  </ion-toolbar>
+</ion-header>
 <ion-content [scrollY]="true">
   <main class="conversation-main">
-    <section class="character" aria-label="Personnage actif">
-      <div class="eyebrow">DE L’AUTRE CÔTÉ DE LA TABLE</div>
-      <div class="portrait" [class.talking]="visualState() === 'speaking'">
-        <img src="assets/avatar.svg" alt="Silhouette du personnage" /><span class="portrait-mark"
-          >✦</span
-        >
-      </div>
-      <h1>{{ npc() }}</h1>
-      <div class="character-state" role="status">
-        <span [attr.data-state]="visualState()"></span>{{ stateLabel() }}
-      </div>
-      @if (capabilities().npc_switch) {
-      <ion-button class="switch-button" size="small" fill="clear" (click)="selectNpc()"
-        >Changer de personnage<ion-icon slot="end" name="chevron-down-outline"
-      /></ion-button>
-      }
-    </section>
+    <app-secret-approvals />
     <div class="section-divider">
       <span></span>
       <p>LE FIL DE LA CONVERSATION</p>
@@ -46,8 +63,8 @@
       <article class="message" [attr.data-speaker]="message.speaker">
         <div class="message-meta">
           <strong
-            >{{ message.speaker === 'player' ? 'Vous' : message.speaker === 'system' ? 'À la table'
-            : message.npc }}</strong
+            >{{ message.speaker === 'player' ? 'Joueur' : message.speaker === 'system' ? 'À la
+            table' : message.npc }}</strong
           ><time>{{ message.timestamp | date:'HH:mm' }}</time>
         </div>
         <div class="bubble">
@@ -83,18 +100,21 @@
     <ion-button fill="clear" size="small" (click)="stopSpeaking()"
       ><ion-icon name="stop-outline" slot="start" />Arrêter la voix</ion-button
     >
-    }
+    } @if (reviewingDisclosures()) {
+    <ion-button fill="clear" (click)="reviewingDisclosures.set(false)"
+      >Reprendre les interactions</ion-button
+    >
+    } @else {
     <app-push-to-talk
       [state]="visualState()"
       [npc]="npc()"
-      [disabled]="!capabilities().audio_input || !microphone.available || connection() !== 'connected'"
+      [disabled]="!!microphoneDisabledReason()"
+      [disabledReason]="microphoneDisabledReason()"
       (pressed)="startRecording()"
       (released)="finishRecording()"
       (cancelled)="cancelRecording()"
     />
-    @if (!capabilities().audio_input) {
-    <p class="capability-note">Ce serveur ne propose pas encore la capture vocale.</p>
-    } @if (capabilities().text_input) {
+    @if (capabilities().text_input) {
     <button
       type="button"
       class="text-toggle"
@@ -102,7 +122,7 @@
       [attr.aria-expanded]="textOpen || !capabilities().audio_input"
       aria-controls="text-composer"
     >
-      <ion-icon name="chatbubble-outline" />Écrire un message<ion-icon
+      <ion-icon name="chatbubble-outline" />Transmettre une réplique de joueur<ion-icon
         name="chevron-down-outline"
       />
     </button>
@@ -111,8 +131,8 @@
       <input
         name="text"
         [(ngModel)]="text"
-        placeholder="Que souhaitez-vous lui dire ?"
-        aria-label="Votre message"
+        placeholder="Que dit le joueur au PNJ ?"
+        aria-label="Réplique du joueur"
         autocomplete="off"
         maxlength="8000"
       /><ion-button
@@ -122,7 +142,7 @@
         ><ion-icon slot="icon-only" name="arrow-up-outline"
       /></ion-button>
     </form>
-    } }
+    } } }
     <div class="conversation-bottom">
       <app-connection-status [state]="connection()" /><span>VOTRE HISTOIRE, VOTRE VOIX</span>
     </div>

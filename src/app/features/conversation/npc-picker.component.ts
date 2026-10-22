@@ -55,11 +55,11 @@ import { NpcWebSocketService } from '../../core/services/npc-websocket.service';
 })
 export class NpcPickerComponent {
   readonly ws = inject(NpcWebSocketService);
-  private readonly modal = inject(ModalController);
+  private readonly modalController = inject(ModalController);
   readonly npcs = toSignal(this.ws.npcs$, { initialValue: [] });
   id = '';
   close(): void {
-    void this.modal.dismiss();
+    void this.modalController.dismiss();
   }
   choose(id: string): void {
     if (id.trim() && this.ws.connected) {

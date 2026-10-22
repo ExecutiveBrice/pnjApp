@@ -11,13 +11,16 @@ if (hosts.some((host) => !/^[a-zA-Z0-9.:[\]-]+$/.test(host)))
 if (existsSync('android/app/src/main/AndroidManifest.xml')) {
   const path = 'android/app/src/main/AndroidManifest.xml';
   let manifest = await readFile(path, 'utf8');
-  if (!manifest.includes('android.permission.RECORD_AUDIO')) {
-    manifest = manifest.replace(
-      '</manifest>',
-      '    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n</manifest>',
-    );
-    await writeFile(path, manifest);
+  // Capacitor's WebChromeClient denies AUDIO_CAPTURE unless both are granted.
+  for (const permission of ['RECORD_AUDIO', 'MODIFY_AUDIO_SETTINGS']) {
+    if (!manifest.includes(`android.permission.${permission}`)) {
+      manifest = manifest.replace(
+        '</manifest>',
+        `    <uses-permission android:name="android.permission.${permission}" />\n</manifest>`,
+      );
+    }
   }
+  await writeFile(path, manifest);
   // Debug-only policy; release retains Android's default prohibition of HTTP.
   await mkdir('android/app/src/debug/res/xml', { recursive: true });
   const debugPath = 'android/app/src/debug/AndroidManifest.xml';

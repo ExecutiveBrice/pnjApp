@@ -1,6 +1,6 @@
 # Écho · Client mobile NPC
 
-Application Ionic 9 / Angular 22 standalone, TypeScript strict, Capacitor 8, RxJS et SCSS. Écho relie les joueurs au WebSocket du serveur `npc`, sans IA ni service cloud côté téléphone. Les ressources visuelles et les polices sont locales. Le client reste utilisable sur le réseau local sans accès Internet après installation.
+Application Ionic 9 / Angular 22 standalone, TypeScript strict, Capacitor 8, RxJS et SCSS. Écho est le compagnon du **maître du jeu** : suivi des interactions joueurs/PNJ, transmission des répliques et validation des divulgations de secrets via le WebSocket du serveur `npc`, sans IA ni service cloud côté téléphone. Les ressources visuelles et les polices sont locales. Le client reste utilisable sur le réseau local sans accès Internet après installation.
 
 ## Installation
 
@@ -29,6 +29,10 @@ npm run mock-server
 Dans l’application, entrer **localhost**, **8766**, puis « Entrer en scène ». Le PNJ vient du `hello`. Écrire **Bonjour !** : l’état passe à `processing`, les fragments enrichissent la même bulle, le texte final la remplace, puis l’état revient à `idle`.
 
 Le mock écoute `ws://0.0.0.0:8766/ws`, accessible dans le navigateur via `ws://localhost:8766/ws`. Il s’agit uniquement d’un outil de développement, pas d’un backend intermédiaire à déployer.
+
+Pour tester la validation MJ, transmettre **Quel est ton secret ?** : une demande apparaît dans l’espace « Divulgation des secrets » au-dessus du personnage. Le mock attend la décision avant de produire une réponse. **Autoriser** laisse le PNJ dévoiler le secret ; **Refuser** produit une réponse qui le garde confidentiel. Le secret proposé apparaît seulement dans l’espace MJ avant autorisation. Les demandes de tous les PNJ restent accessibles lors d’un changement de personnage, même si la transcription est masquée.
+
+Le bouton **Secrets** dans la barre supérieure affiche le nombre de demandes en attente et ouvre leur consultation en repliant les commandes vocales et de saisie. **Reprendre les interactions** réaffiche ces commandes ; l’arrêt d’une voix en cours reste accessible pendant la consultation.
 
 Sur un téléphone, utiliser **l’IP locale du PC**, par exemple `192.168.1.20`, port `8766` : `localhost` désigne le téléphone. Les deux appareils doivent être sur le même réseau Wi-Fi ; le serveur réel doit écouter sur son interface LAN et le pare-feu du PC doit autoriser le port. Les réseaux invités peuvent isoler les appareils. L’émulateur Android peut joindre le PC via `10.0.2.2`.
 
@@ -85,7 +89,7 @@ Lancer ensuite une variante **debug** sur l’appareil ou l’émulateur.
 
 `native:configure` ajoute :
 
-- `android.permission.RECORD_AUDIO` dans `android/app/src/main/AndroidManifest.xml`. Capacitor demande l’autorisation au moment de `getUserMedia` ; l’utilisateur doit l’accepter.
+- `android.permission.RECORD_AUDIO` et `android.permission.MODIFY_AUDIO_SETTINGS` dans `android/app/src/main/AndroidManifest.xml`. Capacitor exige les deux pour autoriser la capture dans la WebView. Seule `RECORD_AUDIO` déclenche une demande à l’utilisateur, au moment de `getUserMedia`.
 - `android/app/src/debug/AndroidManifest.xml`, qui référence `@xml/npc_network_security`.
 - `android/app/src/debug/res/xml/npc_network_security.xml` : politique de base interdisant le cleartext, avec exceptions **uniquement pour les hôtes fournis** par `NPC_LAN_HOSTS`. Aucun joker ni exception globale. Rerun la commande si l’IP du PC change. Une politique debug préexistante différente n’est pas écrasée : fusionner les `domain-config` manuellement.
 
@@ -131,24 +135,78 @@ Autoriser le micro et le réseau local lors des demandes iOS. `NSAllowsLocalNetw
 - Les WebViews récentes Android/iOS doivent fournir MediaRecorder et un décodeur pour le format qu’elles enregistrent. En cas d’API, d’autorisation ou de codec indisponible, un message explique l’erreur et la saisie texte reste disponible si le serveur l’autorise. La capture et la lecture en arrière-plan ne sont pas prises en charge.
 - Le rééchantillonnage moyenne les échantillons dans chaque intervalle (suffisant pour cette V1 vocale), sans filtre haute fidélité spécialisé.
 
+### Micro grisé sur le téléphone
+
+Le message sous le bouton indique ce qui bloque : connexion au serveur, API de capture indisponibles ou entrée vocale désactivée côté serveur. L’installation en debug et la permission Android ne suffisent pas à activer le bouton : le serveur doit annoncer `capabilities.audio_input: true` dans son message `hello` et traiter `audio_input_start`, les données PCM binaires et `audio_input_end`. Sans cette capacité, l’application ne demande pas encore l’autorisation du microphone.
+
+Le mock désactive l’entrée vocale par défaut. Pour tester la capture sous PowerShell, arrêter le mock existant puis lancer :
+
+```powershell
+$env:MOCK_AUDIO_INPUT="1"
+npm run mock-server
+```
+
+Reconnecter ensuite l’application. Le mock accepte le PCM mais ne transcrit pas la voix. Pour le serveur NPC réel, activer ou implémenter la réception vocale côté serveur ; annoncer la capacité seule ne suffit pas à traiter le son.
+
+Si le bouton est actif mais que la capture est refusée malgré l’autorisation Android, vérifier que le manifeste contient aussi `MODIFY_AUDIO_SETTINGS` : Capacitor refuse la requête WebView si cette permission manque, même avec `RECORD_AUDIO` accordée. Relancer `native:configure` avec les mêmes `NPC_LAN_HOSTS`, reconstruire l’APK et le réinstaller après correction du manifeste. Cette permission n’ajoute pas de dialogue Android. Les erreurs affichées distinguent un accès bloqué, un micro impossible à ouvrir et un périphérique absent.
+
 ## Lecture de la voix
 
 `AudioPlaybackService` reçoit `audio_start`, les frames binaires et `audio_end`. Il assemble les octets, y compris lorsqu’une frame coupe un échantillon en deux, puis convertit `int16 / 32768` en Float32. Le `AudioBuffer` utilise **le sample_rate fourni par le serveur**, jamais une fréquence codée en dur. Mono / `pcm_s16le` uniquement ; les formats non conformes sont ignorés avec avertissement.
 
-La V1 attend `audio_end` avant de lire. Les réponses sont mises en file et jouées séquentiellement ; la lecture réellement streaming pourra se concentrer dans ce service. Le tampon courant est limité à 32 Mio et la file à quatre réponses. Sans geste utilisateur préalable, ou si la lecture automatique est désactivée, le bouton **Écouter la réponse** permet de lancer la lecture. Le réglage de volume agit sur un `GainNode`.
+Chaque `audio_end` clôt un segment, pas nécessairement une réponse : Pocket TTS envoie notamment des blocs de 80 ms à 24 kHz. Les segments sont programmés à l’avance sur une même horloge Web Audio, avec un tampon initial de 160 ms. Le lecteur n’attend pas les callbacks `onended` pour démarrer le bloc suivant, ce qui évite les microcoupures dues au thread JavaScript. Le contexte audio privilégie 24 kHz pour éviter de réinitialiser le rééchantillonnage à chaque petit bloc Pocket ; les fréquences annoncées par les autres voix restent respectées, et un contexte par défaut sert de repli si nécessaire.
+
+Le tampon courant reste limité à 32 Mio et l’ensemble du son en attente à 120 secondes. Un dépassement arrête la lecture avec un message ; aucun bloc n’est supprimé silencieusement au milieu d’une réplique. Sans geste utilisateur préalable, ou si la lecture automatique est désactivée, le bouton **Écouter la réponse** permet de lancer la lecture. Le réglage de volume agit sur un `GainNode`. L’arrêt annule toutes les sources déjà programmées, y compris celles dont la lecture n’a pas encore commencé.
 
 Pendant `speaking` ou une lecture locale, appuyer sur le micro envoie d’abord `stop_speaking`, arrête et vide l’audio local, puis demande le micro. L’arrêt, le changement de PNJ et la déconnexion invalident aussi les lectures en attente. Le protocole n’ayant pas d’identifiant de tour, le serveur doit cesser de produire l’ancienne réponse après `stop_speaking` ; un nouvel `audio_start` est considéré comme une nouvelle réponse.
 
 Le mock sonore valide le transport PCM, **pas l’intelligibilité d’une voix Piper**. La lecture d’un vrai flux Piper et les permissions sur appareils physiques Android/iOS restent à valider avec votre serveur et vos appareils.
 
+## Validation MJ des secrets : extension du protocole
+
+Cette extension est implémentée dans le client et le mock de ce dépôt. **Le serveur NPC réel, absent de ce dépôt, doit implémenter le contrat ci-dessous** pour rendre la validation opérationnelle. Sans `capabilities.secret_approval: true` dans `hello`, l’application affiche que la fonction n’est pas disponible et n’envoie aucune décision.
+
+Le serveur crée un `request_id` unique et stable pour chaque proposition, puis envoie au MJ :
+
+```json
+{
+  "type": "secret_disclosure_requested",
+  "request_id": "disclosure-42",
+  "npc": "Mordrek",
+  "secret": "Le passage sous la tour mène au trésor.",
+  "context": "Le joueur demande comment entrer dans la tour."
+}
+```
+
+`request_id`, `npc` et `secret` sont des chaînes non vides ; `context` est une chaîne, éventuellement vide. À chaque commande `status`, y compris après reconnexion, le serveur envoie une liste **complète** des demandes en attente de tous les PNJ : `{ "type": "secret_disclosure_list", "requests": [...] }`. Chaque élément contient les quatre champs ci-dessus, sans `type`. Une liste vide retire les demandes devenues obsolètes ; une décision prise depuis un autre poste MJ est diffusée aux clients concernés.
+
+Le bouton MJ envoie :
+
+```json
+{ "type": "resolve_secret_disclosure", "request_id": "disclosure-42", "decision": "approved" }
+```
+
+`decision` vaut `approved` ou `rejected`. Le serveur applique la décision puis confirme :
+
+```json
+{ "type": "secret_disclosure_resolved", "request_id": "disclosure-42", "decision": "approved" }
+```
+
+Le client désactive les deux boutons pendant l’envoi et attend cette confirmation avant d’afficher « Autorisée » ou « Refusée ». Sans confirmation après 10 secondes, il redemande `status` et permet de réessayer ; une erreur ou une déconnexion ne vaut jamais autorisation. Le serveur doit arbitrer les décisions concurrentes et empêcher qu’une nouvelle commande modifie une décision déjà appliquée. Une répétition de la même décision doit pouvoir renvoyer sa confirmation sans reproduire la divulgation.
+
+**Le blocage de la divulgation appartient au serveur** : aucun fragment texte, réponse finale ni audio contenant le secret ne doit être produit pour les joueurs avant autorisation. Sur refus, le serveur poursuit avec une réponse qui préserve le secret. Les événements MJ et leur contenu doivent être réservés aux connexions autorisées comme MJ ; la capacité annoncée au client n’est pas un mécanisme d’authentification. Le mock est réservé aux essais locaux et considère ses connexions comme des postes MJ.
+
+Les secrets ne sont ni injectés dans le fil de conversation par le client ni enregistrés dans `localStorage`. Les 100 dernières décisions confirmées sont consultables en mémoire jusqu’à la déconnexion. Les demandes en attente sont restaurées depuis le serveur après reconnexion ; le mock les conserve entre connexions, jusqu’à son arrêt. Son secret de démonstration est une fixture, comme ses PNJ.
+
 ## Protocole et état
 
 - WebSocket natif exclusivement dans `NpcWebSocketService`, `binaryType = 'arraybuffer'`, envoi et réception JSON typés. Les JSON invalides, types inconnus et champs invalides sont ignorés sans couper la connexion.
 - Attente de `hello` avant d’exposer `connected` ou d’envoyer des commandes ; timeout de 10 s. Seul `protocol: 1` est accepté ; une autre version affiche une erreur et arrête la reconnexion.
-- Capacités absentes : texte oui, entrée audio non, sortie audio non, sélection PNJ non. Les sorties PCM reçues restent lisibles même avec un ancien `hello`. Les fonctions d’entrée et de sélection sont conditionnées aux capacités.
+- Capacités absentes : texte oui, entrée audio non, sortie audio non, sélection PNJ non, validation des secrets non. Les sorties PCM reçues restent lisibles même avec un ancien `hello`. Les fonctions d’entrée, de sélection et de validation sont conditionnées aux capacités.
 - `say`, `switch_npc`, `stop_speaking`, `status`, états et événements texte/audio du cahier des charges sont implémentés. `status` est demandé après chaque `hello`.
 - Reconnexion après 1, 2, 5, 10 puis 10 secondes ; attente d’un nouveau `hello`, réinitialisation des capacités et de la liste. L’arrêt explicite ou la désactivation du réglage interrompt les tentatives.
 - La modal utilise `npc_list`. En l’absence de liste, un identifiant fourni par le MJ peut être saisi si `npc_switch` est autorisé. Le nom actif change à réception de `npc_switched`.
+- Le PNJ actif reste visible dans l’en-tête de conversation ; cliquer sur sa fiche ouvre la sélection si `npc_switch` est autorisé. Chaque entrée de `npc_list` peut inclure une `description` textuelle facultative, affichée comme résumé sous son nom.
 - Historique limité aux 500 dernières bulles en mémoire, sans persistance des conversations. Ajout immédiat du texte joueur, dédoublonnage de son écho `player_spoke`, puis concaténation des chunks PNJ dans une bulle. Une réponse finale sans chunks est également acceptée.
 - `SettingsService` encapsule `localStorage` et valide les préférences relues. Adresse, port, reconnexion, lecture automatique, transcription et volume y sont stockés. L’interface continue de fonctionner si le stockage est indisponible et informe de l’échec de sauvegarde.
 
@@ -167,7 +225,7 @@ src/app/
     guards/connection.guard.ts     Accès à la conversation après hello
   features/
     connection/                    Adresse et connexion au serveur
-    conversation/                  PNJ actif, bulles, voix et modal de sélection
+    conversation/                  Espace MJ, validation des secrets, interactions, voix et sélection PNJ
     settings/                      Préférences utilisateur
   shared/
     components/                    Push-to-talk et statut de connexion

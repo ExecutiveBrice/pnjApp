@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NpcWebSocketService } from './npc-websocket.service';
 import { SettingsService } from './settings.service';
 import { ConversationStore } from './conversation.store';
-import { AudioPacket, Capabilities, NpcState } from '../models/protocol';
+import { AudioPacket, Capabilities, NpcState, SecretDisclosure } from '../models/protocol';
 
 class FakeSocket {
   binaryType = 'blob';
@@ -86,6 +86,7 @@ describe('NpcWebSocketService', () => {
       audio_input: false,
       audio_output: false,
       npc_switch: false,
+      secret_approval: false,
     });
     sockets[0].receive({ type: 'state', state: 'processing' });
     expect(state).toBe('processing');
@@ -228,5 +229,134 @@ describe('NpcWebSocketService', () => {
     sockets[0].receive({ type: 'error', message: 'Indisponible' });
     expect(error).toHaveBeenCalledWith('Indisponible');
     expect(ws.connected).toBe(true);
+  });
+  const request = {
+    request_id: 'secret-1',
+    npc: 'Guide',
+    secret: 'Le duc est un espion.',
+    context: 'Le joueur interroge le guide sur le duc.',
+  };
+  const requested = { type: 'secret_disclosure_requested', ...request };
+  const snapshot = { type: 'secret_disclosure_list', requests: [request] };
+
+  it('keeps secrets out of conversation and waits for server confirmation, preventing double decisions', () => {
+    sockets[0].hello({ secret_approval: true });
+    let disclosures: SecretDisclosure[] = [];
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    sockets[0].receive(requested);
+    sockets[0].receive(requested);
+    expect(disclosures).toEqual([{ ...requested, status: 'pending' }]);
+    expect(store.value).toHaveLength(0);
+    ws.resolveDisclosure(request.request_id, 'approved');
+    ws.resolveDisclosure(request.request_id, 'rejected');
+    expect(sockets[0].sent.slice(1)).toEqual([
+      JSON.stringify({
+        type: 'resolve_secret_disclosure',
+        request_id: request.request_id,
+        decision: 'approved',
+      }),
+    ]);
+    expect(disclosures[0].status).toBe('sending');
+    sockets[0].receive({
+      type: 'secret_disclosure_resolved',
+      request_id: 'unknown',
+      decision: 'approved',
+    });
+    expect(disclosures[0].status).toBe('sending');
+    sockets[0].receive({
+      type: 'secret_disclosure_resolved',
+      request_id: request.request_id,
+      decision: 'approved',
+    });
+    expect(disclosures[0].status).toBe('approved');
+    expect(store.value).toHaveLength(0);
+    const error = vi.fn();
+    ws.errors$.subscribe(error);
+    vi.advanceTimersByTime(10000);
+    expect(error).not.toHaveBeenCalled();
+  });
+  it('accepts a refusal from another MJ and preserves requests across NPC switches', () => {
+    sockets[0].hello({ secret_approval: true });
+    let disclosures: SecretDisclosure[] = [];
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    sockets[0].receive(snapshot);
+    sockets[0].receive({ type: 'npc_switched', npc: 'Aubergiste' });
+    expect(disclosures[0].npc).toBe('Guide');
+    sockets[0].receive({
+      type: 'secret_disclosure_resolved',
+      request_id: request.request_id,
+      decision: 'rejected',
+    });
+    expect(disclosures[0].status).toBe('rejected');
+    ws.resolveDisclosure(request.request_id, 'approved');
+    expect(sockets[0].sent).toEqual(['{"type":"status"}']);
+  });
+  it('requires the server capability and a known pending request', () => {
+    sockets[0].hello();
+    let disclosures: SecretDisclosure[] = [];
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    sockets[0].receive(requested);
+    sockets[0].receive(snapshot);
+    ws.resolveDisclosure(request.request_id, 'approved');
+    expect(disclosures).toEqual([]);
+    sockets[0].hello({ secret_approval: true });
+    ws.resolveDisclosure('unknown', 'approved');
+    expect(sockets[0].sent).toEqual(['{"type":"status"}', '{"type":"status"}']);
+  });
+  it('uses authoritative snapshots and resynchronizes after reconnecting', () => {
+    sockets[0].hello({ secret_approval: true });
+    let disclosures: SecretDisclosure[] = [];
+    let synced = false;
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    ws.disclosuresSynced$.subscribe((value) => (synced = value));
+    sockets[0].receive(snapshot);
+    expect(synced).toBe(true);
+    ws.resolveDisclosure(request.request_id, 'approved');
+    sockets[0].receive(snapshot);
+    expect(disclosures[0].status).toBe('sending');
+    sockets[0].receive({ type: 'secret_disclosure_list', requests: [] });
+    expect(disclosures).toEqual([]);
+    sockets[0].receive(requested);
+    sockets[0].close();
+    expect(disclosures).toEqual([]);
+    expect(synced).toBe(false);
+    ws.resolveDisclosure(request.request_id, 'approved');
+    vi.advanceTimersByTime(1000);
+    sockets[1].hello({ secret_approval: true });
+    expect(sockets[1].sent).toEqual(['{"type":"status"}']);
+    sockets[1].receive(snapshot);
+    expect(disclosures[0].status).toBe('pending');
+  });
+  it('allows retry and requests status when a decision is not confirmed, without approving on error', () => {
+    sockets[0].hello({ secret_approval: true });
+    let disclosures: SecretDisclosure[] = [];
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    sockets[0].receive(snapshot);
+    ws.resolveDisclosure(request.request_id, 'approved');
+    sockets[0].receive({ type: 'error', message: 'Décision refusée par le serveur.' });
+    expect(disclosures[0].status).toBe('sending');
+    vi.advanceTimersByTime(10000);
+    expect(disclosures[0].status).toBe('pending');
+    expect(sockets[0].sent.at(-1)).toBe('{"type":"status"}');
+    ws.resolveDisclosure(request.request_id, 'rejected');
+    expect(disclosures[0].status).toBe('sending');
+  });
+  it('leaves a request pending if sending the decision fails and cancels timers on disconnect', () => {
+    sockets[0].hello({ secret_approval: true });
+    let disclosures: SecretDisclosure[] = [];
+    ws.disclosures$.subscribe((value) => (disclosures = value));
+    sockets[0].receive(snapshot);
+    vi.spyOn(sockets[0], 'send').mockImplementationOnce(() => {
+      throw new Error('closed');
+    });
+    ws.resolveDisclosure(request.request_id, 'approved');
+    expect(disclosures[0].status).toBe('pending');
+    ws.resolveDisclosure(request.request_id, 'approved');
+    ws.disconnect();
+    const error = vi.fn();
+    ws.errors$.subscribe(error);
+    vi.advanceTimersByTime(10000);
+    expect(disclosures).toEqual([]);
+    expect(error).not.toHaveBeenCalled();
   });
 });

@@ -5,16 +5,19 @@ export interface Capabilities {
   audio_input: boolean;
   audio_output: boolean;
   npc_switch: boolean;
+  secret_approval: boolean;
 }
 export const DEFAULT_CAPABILITIES: Capabilities = {
   text_input: true,
   audio_input: false,
   audio_output: false,
   npc_switch: false,
+  secret_approval: false,
 };
 export interface Npc {
   id: string;
   name: string;
+  description?: string;
 }
 export interface HelloEvent {
   type: 'hello';
@@ -63,6 +66,20 @@ export interface NpcListEvent {
   type: 'npc_list';
   npcs: Npc[];
 }
+export type DisclosureDecision = 'approved' | 'rejected';
+export interface SecretDisclosureRequest {
+  request_id: string;
+  npc: string;
+  secret: string;
+  context: string;
+}
+export interface SecretDisclosure extends SecretDisclosureRequest {
+  status: 'pending' | 'sending' | DisclosureDecision;
+}
+export type SecretDisclosureEvent =
+  | ({ type: 'secret_disclosure_requested' } & SecretDisclosureRequest)
+  | { type: 'secret_disclosure_list'; requests: SecretDisclosureRequest[] }
+  | { type: 'secret_disclosure_resolved'; request_id: string; decision: DisclosureDecision };
 export type ServerEvent =
   | HelloEvent
   | StateEvent
@@ -73,12 +90,14 @@ export type ServerEvent =
   | ErrorEvent
   | AudioStartEvent
   | AudioEndEvent
-  | NpcListEvent;
+  | NpcListEvent
+  | SecretDisclosureEvent;
 export type ClientCommand =
   | { type: 'say'; text: string }
   | { type: 'switch_npc'; npc: string }
   | { type: 'stop_speaking' }
   | { type: 'status' }
+  | { type: 'resolve_secret_disclosure'; request_id: string; decision: DisclosureDecision }
   | { type: 'audio_input_start'; sample_rate: 16000; channels: 1; format: 'pcm_s16le' }
   | { type: 'audio_input_end' };
 export type AudioPacket =
@@ -95,6 +114,14 @@ export interface ConversationMessage {
 const states: readonly unknown[] = ['idle', 'recording', 'processing', 'speaking'];
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+const nonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0;
+const isDisclosureRequest = (value: unknown): value is SecretDisclosureRequest =>
+  isRecord(value) &&
+  nonEmptyString(value['request_id']) &&
+  nonEmptyString(value['npc']) &&
+  nonEmptyString(value['secret']) &&
+  typeof value['context'] === 'string';
 export function eventType(value: unknown): string {
   return isRecord(value) && typeof value['type'] === 'string' ? value['type'] : '(absent)';
 }
@@ -110,7 +137,7 @@ export function parseServerEvent(value: unknown): ServerEvent | null {
       if (
         caps !== undefined &&
         (!isRecord(caps) ||
-          ['text_input', 'audio_input', 'audio_output', 'npc_switch'].some(
+          ['text_input', 'audio_input', 'audio_output', 'npc_switch', 'secret_approval'].some(
             (key) => caps[key] !== undefined && typeof caps[key] !== 'boolean',
           ))
       )
@@ -146,9 +173,27 @@ export function parseServerEvent(value: unknown): ServerEvent | null {
       return Array.isArray(value['npcs']) &&
         value['npcs'].every(
           (item) =>
-            isRecord(item) && typeof item['id'] === 'string' && typeof item['name'] === 'string',
+            isRecord(item) &&
+            typeof item['id'] === 'string' &&
+            typeof item['name'] === 'string' &&
+            (item['description'] === undefined || typeof item['description'] === 'string'),
         )
         ? (value as unknown as NpcListEvent)
+        : null;
+    case 'secret_disclosure_requested':
+      return isDisclosureRequest(value) ? (value as unknown as SecretDisclosureEvent) : null;
+    case 'secret_disclosure_list': {
+      const requests = value['requests'];
+      return Array.isArray(requests) &&
+        requests.every(isDisclosureRequest) &&
+        new Set(requests.map((request) => request.request_id)).size === requests.length
+        ? (value as unknown as SecretDisclosureEvent)
+        : null;
+    }
+    case 'secret_disclosure_resolved':
+      return nonEmptyString(value['request_id']) &&
+        (value['decision'] === 'approved' || value['decision'] === 'rejected')
+        ? (value as unknown as SecretDisclosureEvent)
         : null;
     default:
       return null;
