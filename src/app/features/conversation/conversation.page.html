@@ -1,11 +1,16 @@
 <ion-content [scrollY]="true">
   <main class="conversation-main">
+    @if (reviewingDisclosures() || pendingDisclosures()) {
+    <app-secret-approvals />
+    }
     <section class="gm-notes" aria-labelledby="gm-notes-title">
       <div class="gm-notes-heading">
         <div class="gm-notes-character">
           <p class="eyebrow">DERRIÈRE L’ÉCRAN</p>
           <h1 id="gm-notes-title">{{ displayedNpc() }}</h1>
-          @if (hasSpeechControls()) {
+          @if (selectedNpc()?.description) {
+          <p class="character-summary">{{ selectedNpc()?.description }}</p>
+          } @if (hasSpeechControls()) {
           <select
             id="speech-npc"
             aria-label="Personnage"
@@ -160,16 +165,22 @@
     <ion-button fill="clear" size="small" (click)="stopSpeaking()"
       ><ion-icon name="stop-outline" slot="start" />Arrêter la voix</ion-button
     >
-    } @if (capabilities().audio_input) {
+    } @if (reviewingDisclosures()) {
+    <ion-button fill="clear" (click)="reviewingDisclosures.set(false)"
+      >Reprendre les interactions</ion-button
+    >
+    } @else {
+
     <app-push-to-talk
       [state]="visualState()"
       [npc]="npc()"
-      [disabled]="!capabilities().audio_input || !microphone.available || connection() !== 'connected' || speechPending()"
+      [disabled]="!!microphoneDisabledReason()"
+      [disabledReason]="microphoneDisabledReason()"
       (pressed)="startRecording()"
       (released)="finishRecording()"
       (cancelled)="cancelRecording()"
     />
-    } @if (capabilities().text_input && connection() === 'connected') { @if
+    @if (capabilities().text_input && connection() === 'connected') { @if
     (capabilities().audio_input) {
     <button
       type="button"
@@ -198,11 +209,16 @@
         ><ion-icon slot="icon-only" name="arrow-up-outline"
       /></ion-button>
     </form>
-    } }
+    } } }
     <div class="conversation-bottom">
       <app-connection-status [state]="connection()" />
       <nav aria-label="Navigation">
         <ion-buttons>
+          @if (capabilities().secret_approval) {
+          <ion-button (click)="showDisclosures()"
+            >Validations · {{ pendingDisclosures() }}</ion-button
+          >
+          }
           <ion-button routerLink="/stories">Histoires</ion-button>
           <ion-button routerLink="/settings" aria-label="Réglages">
             <ion-icon slot="icon-only" name="options-outline" />

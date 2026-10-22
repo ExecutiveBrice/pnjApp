@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 
 const port = Number(process.env['PORT'] ?? 8766);
 // Fixtures belong to the mock only; the mobile client has no campaign data.
@@ -86,20 +87,30 @@ const httpServer = createServer((request, response) => {
   });
   response.end(storyWav);
 });
+// Shared by MJ connections and retained during reconnects for this mock process.
+const disclosures = new Map();
+const resolvedDisclosures = new Map();
 const server = new WebSocketServer({
   server: httpServer,
   path: '/ws',
   maxPayload: 2 * 1024 * 1024,
 });
 server.on('listening', () =>
-  console.log(`[MOCK] ws://localhost:${port}/ws (LAN: utilisez l’IP de ce PC)`),
+  console.log(`[MOCK] ws://localhost:${server.address().port}/ws (LAN: utilisez l’IP de ce PC)`),
 );
 server.on('error', (error) => {
   console.error(`[MOCK] ${error.message}`);
   process.exitCode = 1;
 });
+const broadcast = (event) => {
+  for (const client of server.clients) {
+    if (client.readyState === WebSocket.OPEN && client.secretApproval)
+      client.send(JSON.stringify(event));
+  }
+};
 
 server.on('connection', (socket) => {
+  socket.secretApproval = gm;
   let npc = npcs[0];
   let state = 'idle';
   let turn = 0;
@@ -135,19 +146,46 @@ server.on('connection', (socket) => {
   if (!legacy) send({ type: 'npc_list', npcs });
   sendSpeechCatalog();
 
-  const respond = async (text, cueReply) => {
+  const respond = async (text, resolvedReply, echo = true, speaker = npc.name) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
     const current = ++turn;
-    if (!cueReply) send({ type: 'player_spoke', text });
+    if (echo) send({ type: 'player_spoke', text });
+    if (gm && resolvedReply === undefined && /\bsecret\b/i.test(text)) {
+      const request = {
+        request_id: randomUUID(),
+        npc: speaker,
+        secret: 'Le passage sous la vieille tour mène à la salle du trésor.',
+        context: `Le joueur demande : « ${text} »`,
+      };
+      disclosures.set(request.request_id, {
+        request,
+        reply: (decision) => {
+          if (socket.readyState !== WebSocket.OPEN) return false;
+          void respond(
+            text,
+            decision === 'approved' ? request.secret : 'Je préfère garder cela pour moi.',
+            false,
+            speaker,
+          );
+          return true;
+        },
+      });
+      broadcast({ type: 'secret_disclosure_requested', ...request });
+      setState('idle');
+      return;
+    }
     setState('processing');
     await delay(500);
     const reply =
-      cueReply ?? `Bienvenue à la table. Vous me dites « ${text} »… Prenez place, je vous écoute.`;
+      resolvedReply ??
+      `Bienvenue à la table. Vous me dites « ${text} »… Prenez place, je vous écoute.`;
     for (const chunk of reply.match(/.{1,16}/gs) ?? []) {
       if (turn !== current || socket.readyState !== WebSocket.OPEN) return;
-      send({ type: 'npc_reply_chunk', npc: npc.name, text: chunk });
+      send({ type: 'npc_reply_chunk', npc: speaker, text: chunk });
       await delay(100);
     }
-    send({ type: 'npc_replied', npc: npc.name, text: reply });
+    if (turn !== current || socket.readyState !== WebSocket.OPEN) return;
+    send({ type: 'npc_replied', npc: speaker, text: reply });
     if (audioOutput) {
       setState('speaking');
       const rate = 22050;
@@ -162,7 +200,7 @@ server.on('connection', (socket) => {
         );
       send({
         type: 'audio_start',
-        npc: npc.name,
+        npc: speaker,
         sample_rate: rate,
         channels: 1,
         format: 'pcm_s16le',
@@ -212,7 +250,7 @@ server.on('connection', (socket) => {
           rude: 'Assez bavardé. Dites ce que vous voulez et laissez-moi travailler.',
           complaisant: 'Bien sûr, prenez votre temps. Je vais faire de mon mieux pour vous aider.',
         };
-        void respond('', replies[attitude.id]);
+        void respond('', replies[attitude.id], false);
         break;
       }
       case 'studio_list':
@@ -232,7 +270,59 @@ server.on('connection', (socket) => {
         send({ type: 'status', state });
         if (!legacy) send({ type: 'npc_list', npcs });
         sendSpeechCatalog();
+        if (gm)
+          send({
+            type: 'secret_disclosure_list',
+            requests: [...disclosures.values()].map((entry) => entry.request),
+          });
         break;
+      case 'resolve_secret_disclosure': {
+        if (!gm || (command.decision !== 'approved' && command.decision !== 'rejected')) {
+          send({
+            type: 'error',
+            message: 'Décision de divulgation invalide ou non prise en charge.',
+          });
+          break;
+        }
+        const previous = resolvedDisclosures.get(command.request_id);
+        if (previous === command.decision) {
+          send({
+            type: 'secret_disclosure_resolved',
+            request_id: command.request_id,
+            decision: previous,
+          });
+          break;
+        }
+        const entry = disclosures.get(command.request_id);
+        if (!entry) {
+          send({ type: 'error', message: 'Cette demande n’est plus en attente.' });
+          // Reconcile a stale client without treating the error as an approval.
+          send({
+            type: 'secret_disclosure_list',
+            requests: [...disclosures.values()].map((item) => item.request),
+          });
+          break;
+        }
+        disclosures.delete(command.request_id);
+        resolvedDisclosures.set(command.request_id, command.decision);
+        broadcast({
+          type: 'secret_disclosure_resolved',
+          request_id: command.request_id,
+          decision: command.decision,
+        });
+        if (!entry.reply(command.decision)) {
+          // Continue the demo on the deciding MJ connection after a reconnect.
+          void respond(
+            '',
+            command.decision === 'approved'
+              ? entry.request.secret
+              : 'Je préfère garder cela pour moi.',
+            false,
+            entry.request.npc,
+          );
+        }
+        break;
+      }
       case 'stop_speaking':
         ++turn;
         inputBytes = null;

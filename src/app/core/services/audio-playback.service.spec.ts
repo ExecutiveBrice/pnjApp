@@ -10,6 +10,7 @@ import { MemoryHistory } from '../../../../tests/conversation-history';
 class FakeContext {
   static instances: FakeContext[] = [];
   state = 'running';
+  currentTime = 10;
   destination = {};
   sources: {
     start: ReturnType<typeof vi.fn>;
@@ -21,7 +22,7 @@ class FakeContext {
   }[] = [];
   createBuffer = vi.fn(() => ({ copyToChannel: vi.fn() }));
   gain = { gain: { value: 1 }, connect: vi.fn() };
-  constructor() {
+  constructor(readonly options?: AudioContextOptions) {
     FakeContext.instances.push(this);
   }
   createGain(): typeof this.gain {
@@ -51,11 +52,12 @@ describe('AudioPlaybackService', () => {
   let packets: Subject<AudioPacket>;
   let store: ConversationStore;
   let history: MemoryHistory;
-  const start = (): void =>
+
+  const start = (rate = 22050): void =>
     packets.next({
       type: 'audio_start',
       npc: 'Test',
-      sample_rate: 22050,
+      sample_rate: rate,
       channels: 1,
       format: 'pcm_s16le',
     });
@@ -87,6 +89,7 @@ describe('AudioPlaybackService', () => {
     chunk([0]);
     chunk([128, 255, 127]);
     const context = FakeContext.instances[0];
+    expect(context.options?.sampleRate).toBe(24000);
     expect(context.sources).toHaveLength(0);
     end();
     await Promise.resolve();
@@ -118,10 +121,75 @@ describe('AudioPlaybackService', () => {
     end();
     await Promise.resolve();
     const context = FakeContext.instances[0];
-    expect(context.sources).toHaveLength(1);
+    expect(context.sources).toHaveLength(2);
+    expect(context.sources[0].start).toHaveBeenCalledWith(10.16);
+    expect(context.sources[1].start.mock.calls[0][0]).toBeCloseTo(10.16 + 1 / 22050, 10);
     context.sources[0].onended?.();
     await Promise.resolve();
     expect(context.sources).toHaveLength(2);
+  });
+  it('plays each segment once when manual playback and autoplay are requested together', async () => {
+    await audio.unlock();
+    for (let index = 0; index < 3; index++) {
+      start(24000);
+      packets.next({ type: 'chunk', data: new ArrayBuffer(1920 * 2) });
+      end();
+    }
+    await Promise.all([audio.playPending(), audio.playPending()]);
+    const context = FakeContext.instances[0];
+    expect(context.sources).toHaveLength(3);
+    context.sources.forEach((source, index) => {
+      expect(source.start).toHaveBeenCalledTimes(1);
+      expect(source.start.mock.calls[0][0]).toBeCloseTo(10.16 + index * 0.08, 10);
+      source.onended?.();
+    });
+    await audio.playPending();
+    expect(context.sources).toHaveLength(3);
+  });
+  it('keeps more than four Pocket chunks and schedules every sample without gaps', async () => {
+    settings.update({ autoPlayAudio: false });
+    for (let index = 0; index < 10; index++) {
+      start(24000);
+      packets.next({ type: 'chunk', data: new ArrayBuffer(1920 * 2) });
+      end();
+    }
+    await audio.playPending();
+    const context = FakeContext.instances[0];
+    expect(context.sources).toHaveLength(10);
+    context.sources.forEach((source, index) => {
+      expect(source.start.mock.calls[0][0]).toBeCloseTo(10.16 + index * 0.08, 10);
+    });
+  });
+  it('absorbs packet jitter without moving the existing playback timeline', async () => {
+    await audio.unlock();
+    const context = FakeContext.instances[0];
+    for (const arrival of [10, 10.087, 10.171, 10.255]) {
+      context.currentTime = arrival;
+      start(24000);
+      packets.next({ type: 'chunk', data: new ArrayBuffer(1920 * 2) });
+      end();
+      await Promise.resolve();
+    }
+    expect(context.sources).toHaveLength(4);
+    context.sources.forEach((source, index) => {
+      expect(source.start.mock.calls[0][0]).toBeCloseTo(10.16 + index * 0.08, 10);
+    });
+  });
+  it('cancels every source already scheduled ahead when interrupted', async () => {
+    await audio.unlock();
+    for (let index = 0; index < 3; index++) {
+      start(24000);
+      packets.next({ type: 'chunk', data: new ArrayBuffer(1920 * 2) });
+      end();
+    }
+    await Promise.resolve();
+    const context = FakeContext.instances[0];
+    expect(context.sources).toHaveLength(3);
+    packets.next({ type: 'reset' });
+    context.sources.forEach((source) => {
+      expect(source.stop).toHaveBeenCalledOnce();
+      expect(source.disconnect).toHaveBeenCalledOnce();
+    });
   });
   it('stops current playback and discards partial and queued audio on interruption', async () => {
     await audio.unlock();
@@ -196,7 +264,9 @@ describe('AudioPlaybackService', () => {
     );
     await audio.replay(restored.value[0]);
     const context = FakeContext.instances.at(-1)!;
-    expect(context.sources).toHaveLength(1);
+    expect(context.sources).toHaveLength(2);
+    expect(context.sources[0].start).toHaveBeenCalledExactlyOnceWith(10.16);
+    expect(context.sources[1].start.mock.calls[0][0]).toBeCloseTo(10.16 + 1 / 22050, 10);
     context.sources[0].onended?.();
     await Promise.resolve();
     expect(context.sources).toHaveLength(2);

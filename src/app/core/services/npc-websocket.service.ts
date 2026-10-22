@@ -11,6 +11,8 @@ import {
   NpcState,
   ServerEvent,
   StudioCatalogEvent,
+  DisclosureDecision,
+  SecretDisclosure,
   eventType,
   parseServerEvent,
 } from '../models/protocol';
@@ -28,6 +30,9 @@ export class NpcWebSocketService implements OnDestroy {
   private readonly npcState = new BehaviorSubject<NpcState>('idle');
   private readonly capabilities = new BehaviorSubject<Capabilities>({ ...DEFAULT_CAPABILITIES });
   private readonly npcs = new BehaviorSubject<Npc[]>([]);
+  private readonly disclosures = new BehaviorSubject<SecretDisclosure[]>([]);
+  private readonly disclosuresSynced = new BehaviorSubject(false);
+  private readonly disclosureTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly audio = new Subject<AudioPacket>();
   private readonly speechCatalog = new BehaviorSubject<GmNpcListEvent>({
     type: 'gm_npc_list',
@@ -40,6 +45,8 @@ export class NpcWebSocketService implements OnDestroy {
   readonly npcState$ = this.npcState.asObservable();
   readonly capabilities$ = this.capabilities.asObservable();
   readonly npcs$ = this.npcs.asObservable();
+  readonly disclosures$ = this.disclosures.asObservable();
+  readonly disclosuresSynced$ = this.disclosuresSynced.asObservable();
   readonly audio$ = this.audio.asObservable();
   readonly speechCatalog$ = this.speechCatalog.asObservable();
   readonly speechPending$ = this.speechPending.asObservable();
@@ -138,6 +145,35 @@ export class NpcWebSocketService implements OnDestroy {
   requestStatus(): void {
     this.send({ type: 'status' });
   }
+  resolveDisclosure(requestId: string, decision: DisclosureDecision): void {
+    if (!this.connected || !this.capabilities.value.secret_approval) return;
+    if (decision !== 'approved' && decision !== 'rejected') return;
+    const request = this.disclosures.value.find((item) => item.request_id === requestId);
+    if (request?.status !== 'pending') return;
+    if (!this.send({ type: 'resolve_secret_disclosure', request_id: requestId, decision })) return;
+    this.disclosures.next(
+      this.disclosures.value.map((item) =>
+        item.request_id === requestId ? { ...item, status: 'sending' } : item,
+      ),
+    );
+    this.disclosureTimers.set(
+      requestId,
+      setTimeout(() => {
+        this.disclosureTimers.delete(requestId);
+        this.disclosures.next(
+          this.disclosures.value.map((item) =>
+            item.request_id === requestId && item.status === 'sending'
+              ? { ...item, status: 'pending' }
+              : item,
+          ),
+        );
+        this.errors$.next(
+          'La décision n’a pas été confirmée. Actualisation des demandes ; vous pouvez réessayer.',
+        );
+        this.requestStatus();
+      }, 10000),
+    );
+  }
   sendAudio(pcm: ArrayBuffer): boolean {
     if (!this.capabilities.value.audio_input || !pcm.byteLength || pcm.byteLength % 2) return false;
     const recordingId = this.store.playerRecording(pcm);
@@ -229,6 +265,9 @@ export class NpcWebSocketService implements OnDestroy {
         'audio_end',
         'npc_list',
         'studio_catalog',
+        'secret_disclosure_requested',
+        'secret_disclosure_list',
+        'secret_disclosure_resolved',
       ];
       logger.warn(
         'WS',
@@ -306,6 +345,60 @@ export class NpcWebSocketService implements OnDestroy {
           if (notes !== undefined) this.store.setGmNotes(notes);
         }
         break;
+      case 'secret_disclosure_requested':
+        if (
+          this.capabilities.value.secret_approval &&
+          !this.disclosures.value.some((item) => item.request_id === event.request_id)
+        ) {
+          this.disclosures.next([...this.disclosures.value, { ...event, status: 'pending' }]);
+        }
+        break;
+      case 'secret_disclosure_list': {
+        if (!this.capabilities.value.secret_approval) break;
+        this.disclosuresSynced.next(true);
+        const ids = new Set(event.requests.map((item) => item.request_id));
+        for (const [id, timer] of this.disclosureTimers) {
+          if (!ids.has(id)) {
+            clearTimeout(timer);
+            this.disclosureTimers.delete(id);
+          }
+        }
+        // The server snapshot is authoritative, including after reconnecting.
+        const history = this.disclosures.value
+          .filter(
+            (item) =>
+              !ids.has(item.request_id) &&
+              (item.status === 'approved' || item.status === 'rejected'),
+          )
+          .slice(-100);
+        this.disclosures.next([
+          ...history,
+          ...event.requests.map((request) => ({
+            ...request,
+            status: this.disclosureTimers.has(request.request_id)
+              ? ('sending' as const)
+              : ('pending' as const),
+          })),
+        ]);
+        break;
+      }
+      case 'secret_disclosure_resolved': {
+        if (!this.capabilities.value.secret_approval) break;
+        const request = this.disclosures.value.find((item) => item.request_id === event.request_id);
+        if (!request || (request.status !== 'pending' && request.status !== 'sending')) break;
+        clearTimeout(this.disclosureTimers.get(event.request_id));
+        this.disclosureTimers.delete(event.request_id);
+        const updated = this.disclosures.value.map((item) =>
+          item.request_id === event.request_id ? { ...item, status: event.decision } : item,
+        );
+        this.disclosures.next([
+          ...updated
+            .filter((item) => item.status === 'approved' || item.status === 'rejected')
+            .slice(-100),
+          ...updated.filter((item) => item.status === 'pending' || item.status === 'sending'),
+        ]);
+        break;
+      }
       case 'error':
         this.speechPending.next(false);
         this.errors$.next(event.message);
@@ -357,6 +450,10 @@ export class NpcWebSocketService implements OnDestroy {
     this.npcState.next('idle');
     this.capabilities.next({ ...DEFAULT_CAPABILITIES });
     this.npcs.next([]);
+    for (const timer of this.disclosureTimers.values()) clearTimeout(timer);
+    this.disclosureTimers.clear();
+    this.disclosures.next([]);
+    this.disclosuresSynced.next(false);
     this.store.interrupt();
   }
   private releaseSocket(): void {

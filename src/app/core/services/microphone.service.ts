@@ -30,10 +30,28 @@ export class MicrophoneService implements OnDestroy {
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         video: false,
       });
-    } catch {
-      throw new Error(
-        'Accès au microphone refusé ou indisponible. Vérifiez les autorisations de votre appareil.',
-      );
+    } catch (error: unknown) {
+      const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : '';
+      switch (name) {
+        case 'NotAllowedError':
+        case 'SecurityError':
+          throw new Error(
+            `Accès au microphone bloqué (${name}). Vérifiez les autorisations de l’application et l’accès au micro de l’appareil.`,
+            { cause: error },
+          );
+        case 'NotReadableError':
+        case 'AbortError':
+          throw new Error(
+            `Impossible d’ouvrir le microphone (${name}). Vérifiez l’accès au micro de l’appareil et fermez les autres applications qui l’utilisent.`,
+            { cause: error },
+          );
+        case 'NotFoundError':
+          throw new Error('Aucun microphone détecté sur cet appareil (NotFoundError).', {
+            cause: error,
+          });
+        default:
+          throw new Error('Impossible d’accéder au microphone sur cet appareil.', { cause: error });
+      }
     }
     if (id !== this.captureId) {
       stream.getTracks().forEach((track) => track.stop());

@@ -47,10 +47,12 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   audio_input: false,
   audio_output: false,
   npc_switch: false,
+  secret_approval: false,
 };
 export interface Npc {
   id: string;
   name: string;
+  description?: string;
   gm_notes?: NpcGmNotes;
 }
 export interface NpcGmNotes {
@@ -124,6 +126,20 @@ export interface NpcListEvent {
   type: 'npc_list';
   npcs: Npc[];
 }
+export type DisclosureDecision = 'approved' | 'rejected';
+export interface SecretDisclosureRequest {
+  request_id: string;
+  npc: string;
+  secret: string;
+  context: string;
+}
+export interface SecretDisclosure extends SecretDisclosureRequest {
+  status: 'pending' | 'sending' | DisclosureDecision;
+}
+export type SecretDisclosureEvent =
+  | ({ type: 'secret_disclosure_requested' } & SecretDisclosureRequest)
+  | { type: 'secret_disclosure_list'; requests: SecretDisclosureRequest[] }
+  | { type: 'secret_disclosure_resolved'; request_id: string; decision: DisclosureDecision };
 export type ServerEvent =
   | HelloEvent
   | StateEvent
@@ -136,7 +152,8 @@ export type ServerEvent =
   | AudioEndEvent
   | StudioCatalogEvent
   | GmNpcListEvent
-  | NpcListEvent;
+  | NpcListEvent
+  | SecretDisclosureEvent;
 export type ClientCommand =
   | { type: 'studio_list' }
   | { type: 'say'; text: string }
@@ -144,6 +161,7 @@ export type ClientCommand =
   | { type: 'switch_npc'; npc: string }
   | { type: 'stop_speaking' }
   | { type: 'status' }
+  | { type: 'resolve_secret_disclosure'; request_id: string; decision: DisclosureDecision }
   | { type: 'audio_input_start'; sample_rate: 16000; channels: 1; format: 'pcm_s16le' }
   | { type: 'audio_input_end' };
 export type AudioPacket =
@@ -184,6 +202,14 @@ export function parseNpcGmNotes(value: unknown): NpcGmNotes | undefined {
   }
   return notes;
 }
+const nonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim().length > 0;
+const isDisclosureRequest = (value: unknown): value is SecretDisclosureRequest =>
+  isRecord(value) &&
+  nonEmptyString(value['request_id']) &&
+  nonEmptyString(value['npc']) &&
+  nonEmptyString(value['secret']) &&
+  typeof value['context'] === 'string';
 export function eventType(value: unknown): string {
   return isRecord(value) && typeof value['type'] === 'string' ? value['type'] : '(absent)';
 }
@@ -302,16 +328,37 @@ export function parseServerEvent(value: unknown): ServerEvent | null {
       return Array.isArray(value['npcs']) &&
         value['npcs'].every(
           (item) =>
-            isRecord(item) && typeof item['id'] === 'string' && typeof item['name'] === 'string',
+            isRecord(item) &&
+            typeof item['id'] === 'string' &&
+            typeof item['name'] === 'string' &&
+            (item['description'] === undefined || typeof item['description'] === 'string'),
         )
         ? {
             type: 'npc_list',
             npcs: (value['npcs'] as Record<string, unknown>[]).map((item) => ({
               id: item['id'] as string,
               name: item['name'] as string,
+              ...(item['description'] !== undefined
+                ? { description: item['description'] as string }
+                : {}),
               gm_notes: parseNpcGmNotes(item['gm_notes']),
             })),
           }
+        : null;
+    case 'secret_disclosure_requested':
+      return isDisclosureRequest(value) ? (value as unknown as SecretDisclosureEvent) : null;
+    case 'secret_disclosure_list': {
+      const requests = value['requests'];
+      return Array.isArray(requests) &&
+        requests.every(isDisclosureRequest) &&
+        new Set(requests.map((request) => request.request_id)).size === requests.length
+        ? (value as unknown as SecretDisclosureEvent)
+        : null;
+    }
+    case 'secret_disclosure_resolved':
+      return nonEmptyString(value['request_id']) &&
+        (value['decision'] === 'approved' || value['decision'] === 'rejected')
+        ? (value as unknown as SecretDisclosureEvent)
         : null;
     default:
       return null;

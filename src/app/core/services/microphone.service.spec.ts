@@ -9,6 +9,24 @@ describe('MicrophoneService', () => {
     expect(microphone.available).toBe(false);
     await expect(microphone.start()).rejects.toThrow('localhost');
   });
+  it.each([
+    ['NotAllowedError', 'Accès au microphone bloqué'],
+    ['SecurityError', 'Accès au microphone bloqué'],
+    ['NotReadableError', 'Impossible d’ouvrir le microphone'],
+    ['AbortError', 'Impossible d’ouvrir le microphone'],
+    ['NotFoundError', 'Aucun microphone détecté'],
+    ['UnknownError', 'Impossible d’accéder au microphone'],
+  ])(
+    'explains capture failures without treating every error as a refusal (%s)',
+    async (name, message) => {
+      vi.stubGlobal('MediaRecorder', class {});
+      vi.stubGlobal('navigator', {
+        mediaDevices: { getUserMedia: vi.fn().mockRejectedValue({ name }) },
+      });
+      const microphone = new MicrophoneService();
+      await expect(microphone.start()).rejects.toThrow(message);
+    },
+  );
   it('stops a permission request that resolves after pointer release', async () => {
     const stop = vi.fn();
     let resolve: (stream: MediaStream) => void = () => undefined;

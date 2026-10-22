@@ -42,8 +42,11 @@ import { ConversationStore } from '../../core/services/conversation.store';
             fill="outline"
             [disabled]="!ws.connected"
             (click)="choose(npc.id)"
-            >{{ npc.name }}</ion-button
-          >
+            >{{ npc.name }}
+            @if (npc.description) {
+              · {{ npc.description }}
+            }
+          </ion-button>
         } @empty {
           <div class="empty-card">
             <p>Le serveur n’a pas transmis de liste de personnages.</p>

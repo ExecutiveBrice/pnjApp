@@ -81,6 +81,7 @@ describe('ConversationPage speech cues', () => {
             capabilities$: capabilities,
             currentCapabilities: capabilities.value,
             messages$: new BehaviorSubject([]),
+            disclosures$: new BehaviorSubject([]),
             speechCatalog$: speechCatalog,
             speechPending$: pending,
             connected: true,
@@ -102,6 +103,7 @@ describe('ConversationPage speech cues', () => {
           provide: MicrophoneService,
           useValue: {
             recording$: recording,
+            available: true,
             start,
             cancel: vi.fn(),
             finish: vi.fn().mockResolvedValue(null),
@@ -226,6 +228,21 @@ describe('ConversationPage speech cues', () => {
     grant(false);
     await capture;
     expect(page.speechDisabled()).toBe(false);
+  });
+
+  it('stops the NPC output before opening the microphone to avoid recording its voice', async () => {
+    speaking.next(true);
+    state.next('speaking');
+    await page.startRecording();
+    expect(page.audio.stop).toHaveBeenCalledOnce();
+    expect(page.ws.stopSpeaking).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(vi.mocked(page.audio.stop).mock.invocationCallOrder[0]).toBeLessThan(
+      start.mock.invocationCallOrder[0],
+    );
+    expect(vi.mocked(page.ws.stopSpeaking).mock.invocationCallOrder[0]).toBeLessThan(
+      start.mock.invocationCallOrder[0],
+    );
   });
 
   it('does not start a microphone capture while a cue awaits its server response', async () => {

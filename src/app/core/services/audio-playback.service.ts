@@ -16,9 +16,14 @@ export class AudioPlaybackService implements OnDestroy {
   private chunks: ArrayBuffer[] = [];
   private bytes = 0;
   private queue: { data: ArrayBuffer; rate: number }[] = [];
-  private source?: AudioBufferSourceNode;
-  private playing = false;
   private replaying = false;
+  private readonly sources = new Set<AudioBufferSourceNode>();
+  private scheduling = false;
+  private manualPlayback = false;
+  private nextStartTime = 0;
+  private queuedSeconds = 0;
+  private readonly startupBufferSeconds = 0.16;
+  private readonly maxBufferedSeconds = 120;
   private generation = 0;
   private readonly pending = new BehaviorSubject(false);
   private readonly speaking = new BehaviorSubject(false);
@@ -49,7 +54,15 @@ export class AudioPlaybackService implements OnDestroy {
   }
   /** Must be invoked directly from a tap/click to unlock mobile audio. */
   async unlock(): Promise<void> {
-    this.context ??= new AudioContext();
+    if (!this.context) {
+      try {
+        // Pocket emits 24 kHz PCM. Resample the continuous context at the
+        // device output, not each 80 ms source independently at its edges.
+        this.context = new AudioContext({ sampleRate: 24000 });
+      } catch {
+        this.context = new AudioContext();
+      }
+    }
     if (!this.gain) {
       this.gain = this.context.createGain();
       this.gain.gain.value = this.settings.value.volume;
@@ -70,19 +83,26 @@ export class AudioPlaybackService implements OnDestroy {
     this.stop();
     this.replaying = true;
     this.queue = [...message.audio];
+    this.queuedSeconds = this.queue.reduce(
+      (total, clip) => total + clip.data.byteLength / 2 / clip.rate,
+      0,
+    );
     this.pending.next(true);
     await this.playPending();
   }
   stop(): void {
     this.replaying = false;
     this.generation++;
-    if (this.source) {
-      this.source.onended = null;
-      this.source.stop();
-      this.source.disconnect();
+    for (const source of this.sources) {
+      source.onended = null;
+      source.stop();
+      source.disconnect();
     }
-    this.source = undefined;
-    this.playing = false;
+    this.sources.clear();
+    this.scheduling = false;
+    this.manualPlayback = false;
+    this.nextStartTime = 0;
+    this.queuedSeconds = 0;
     this.queue = [];
     this.chunks = [];
     this.bytes = 0;
@@ -132,65 +152,96 @@ export class AudioPlaybackService implements OnDestroy {
           data.set(new Uint8Array(chunk), offset);
           offset += chunk.byteLength;
         }
-        const clip = { data: data.buffer, rate: this.header.sample_rate };
-        if (this.messageId) this.store.attachAudio(this.messageId, clip);
+        const rate = this.header.sample_rate;
+        const messageId = this.messageId;
         this.messageId = undefined;
-        // Limit unplayed replies as well as the in-flight buffer.
-        if (this.queue.length >= 4) this.queue.shift();
-        this.queue.push(clip);
         this.header = undefined;
         this.chunks = [];
         this.bytes = 0;
+        if (data.byteLength % 2 !== 0) {
+          this.errors$.next('Le flux PCM contient un échantillon incomplet.');
+          return;
+        }
+        const clip = { data: data.buffer, rate };
+        if (messageId) this.store.attachAudio(messageId, clip);
+        const duration = data.byteLength / 2 / rate;
+        const scheduledSeconds = this.context
+          ? Math.max(0, this.nextStartTime - this.context.currentTime)
+          : 0;
+        // Four Pocket segments are just 320 ms, not four whole replies.
+        // Never silently remove PCM from the middle of an utterance.
+        if (this.queuedSeconds + scheduledSeconds + duration > this.maxBufferedSeconds) {
+          this.stop();
+          this.errors$.next('Trop de son en attente. Relancez la lecture.');
+          return;
+        }
+        this.queue.push({ data: data.buffer, rate });
+        this.queuedSeconds += duration;
         this.pending.next(true);
-        if (this.settings.value.autoPlayAudio) void this.playNext(false);
+        if (this.settings.value.autoPlayAudio || this.manualPlayback) void this.playNext(false);
         break;
       }
     }
   }
   private async playNext(manual: boolean): Promise<void> {
-    if (this.playing || !this.queue.length) return;
+    if (this.scheduling || !this.queue.length) return;
     if (!manual && (!this.context || this.context.state !== 'running')) return;
     const generation = this.generation;
-    // Reserve the playback slot before awaiting resume; two audio_end events
-    // in the same tick must never start overlapping sources.
-    this.playing = true;
+    // Serialize resume/scheduling, but enqueue sources before onended fires.
+    // JavaScript callbacks cannot provide a gapless 80 ms playback clock.
+    this.scheduling = true;
     try {
       await this.unlock();
       if (generation !== this.generation || !this.context || !this.gain) return;
-      const item = this.queue[0];
-      if (!item) {
-        this.playing = false;
-        return;
+      this.manualPlayback ||= manual;
+      while (this.queue.length) {
+        const item = this.queue[0];
+        const samples = pcm16ToFloat32(item.data);
+        const buffer = this.context.createBuffer(1, samples.length, item.rate);
+        buffer.copyToChannel(samples, 0);
+        const source = this.context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.gain);
+        if (this.nextStartTime <= this.context.currentTime) {
+          // Rebuffer only on startup/underflow. Applying this margin to every
+          // packet would accumulate network jitter into audible gaps again.
+          this.nextStartTime = this.context.currentTime + this.startupBufferSeconds;
+        }
+        const when = this.nextStartTime;
+        source.onended = () => {
+          source.disconnect();
+          this.sources.delete(source);
+          if (generation !== this.generation) return;
+          if (!this.sources.size) {
+            this.speaking.next(false);
+            if (!this.queue.length) {
+              this.manualPlayback = false;
+              this.replaying = false;
+            }
+          }
+        };
+        this.sources.add(source);
+        try {
+          source.start(when);
+        } catch (error) {
+          this.sources.delete(source);
+          source.disconnect();
+          throw error;
+        }
+        this.nextStartTime = when + samples.length / item.rate;
+        this.queue.shift();
+        this.queuedSeconds = Math.max(0, this.queuedSeconds - samples.length / item.rate);
       }
-      const samples = pcm16ToFloat32(item.data);
-      const buffer = this.context.createBuffer(1, samples.length, item.rate);
-      buffer.copyToChannel(samples, 0);
-      const source = this.context.createBufferSource();
-      source.buffer = buffer;
-      source.connect(this.gain);
-      this.source = source;
-      this.playing = true;
-      this.speaking.next(true);
-      this.pending.next(this.queue.length > 0);
-      source.onended = () => {
-        if (generation !== this.generation) return;
-        source.disconnect();
-        this.source = undefined;
-        this.playing = false;
-        this.speaking.next(false);
-        if (!this.queue.length) this.replaying = false;
-        if (manual || this.settings.value.autoPlayAudio) void this.playNext(manual);
-      };
-      source.start();
-      this.queue.shift();
+      this.speaking.next(this.sources.size > 0);
       this.pending.next(this.queue.length > 0);
     } catch {
-      this.playing = false;
-      this.speaking.next(false);
+      this.speaking.next(this.sources.size > 0);
       this.pending.next(this.queue.length > 0);
       this.errors$.next(
         'Impossible de lire cet enregistrement audio. Touchez « Écouter » pour réessayer.',
       );
+    } finally {
+      if (generation === this.generation) this.scheduling = false;
     }
   }
 }
