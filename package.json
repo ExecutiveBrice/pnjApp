@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "ng serve --host 0.0.0.0",
-    "build": "ng build",
+    "build": "ng build && node scripts/build-offline.mjs",
     "test": "vitest run",
     "lint": "eslint . && tsc --noEmit -p tsconfig.spec.json",
     "mock-server": "node scripts/mock-npc-server.mjs",

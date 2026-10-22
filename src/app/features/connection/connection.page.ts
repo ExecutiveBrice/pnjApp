@@ -15,6 +15,7 @@ import { NpcWebSocketService } from '../../core/services/npc-websocket.service';
 import { AudioPlaybackService } from '../../core/services/audio-playback.service';
 import { buildEndpoint } from '../../shared/utils/endpoint';
 import { ConnectionStatusComponent } from '../../shared/components/connection-status.component';
+import { ConversationStore } from '../../core/services/conversation.store';
 
 @Component({
   selector: 'app-connection',
@@ -36,6 +37,7 @@ export class ConnectionPage {
   readonly ws = inject(NpcWebSocketService);
   private readonly audio = inject(AudioPlaybackService);
   readonly state = toSignal(this.ws.connectionState$, { initialValue: this.ws.state });
+  readonly histories = toSignal(inject(ConversationStore).histories$, { initialValue: [] });
   host = this.settings.value.host;
   port = this.settings.value.port;
   error = '';

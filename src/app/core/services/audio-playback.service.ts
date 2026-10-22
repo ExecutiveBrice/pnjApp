@@ -1,21 +1,24 @@
 import { Injectable, OnDestroy } from '@angular/core';
-import { BehaviorSubject, Subject, Subscription } from 'rxjs';
-import { AudioPacket, AudioStartEvent } from '../models/protocol';
+import { BehaviorSubject, Subject, Subscription, distinctUntilChanged, map } from 'rxjs';
+import { AudioPacket, AudioStartEvent, ConversationMessage } from '../models/protocol';
 import { NpcWebSocketService } from './npc-websocket.service';
 import { SettingsService } from './settings.service';
 import { pcm16ToFloat32 } from '../../shared/utils/pcm';
 import { logger } from '../../shared/utils/logger';
+import { ConversationStore } from './conversation.store';
 
 @Injectable({ providedIn: 'root' })
 export class AudioPlaybackService implements OnDestroy {
   private context?: AudioContext;
   private gain?: GainNode;
   private header?: AudioStartEvent;
+  private messageId?: string;
   private chunks: ArrayBuffer[] = [];
   private bytes = 0;
   private queue: { data: ArrayBuffer; rate: number }[] = [];
   private source?: AudioBufferSourceNode;
   private playing = false;
+  private replaying = false;
   private generation = 0;
   private readonly pending = new BehaviorSubject(false);
   private readonly speaking = new BehaviorSubject(false);
@@ -27,8 +30,17 @@ export class AudioPlaybackService implements OnDestroy {
   constructor(
     ws: NpcWebSocketService,
     private readonly settings: SettingsService,
+    private readonly store: ConversationStore,
   ) {
     this.subscriptions.add(ws.audio$.subscribe((packet) => this.receive(packet)));
+    this.subscriptions.add(
+      store.active$
+        .pipe(
+          map((conversation) => conversation?.key),
+          distinctUntilChanged(),
+        )
+        .subscribe(() => this.stop()),
+    );
     this.subscriptions.add(
       settings.settings$.subscribe((value) => {
         if (this.gain) this.gain.gain.value = value.volume;
@@ -53,7 +65,16 @@ export class AudioPlaybackService implements OnDestroy {
       this.errors$.next('La lecture audio est indisponible sur cet appareil.');
     }
   }
+  async replay(message: ConversationMessage): Promise<void> {
+    if (message.speaker === 'system' || !message.audio?.length) return;
+    this.stop();
+    this.replaying = true;
+    this.queue = [...message.audio];
+    this.pending.next(true);
+    await this.playPending();
+  }
   stop(): void {
+    this.replaying = false;
     this.generation++;
     if (this.source) {
       this.source.onended = null;
@@ -66,6 +87,7 @@ export class AudioPlaybackService implements OnDestroy {
     this.chunks = [];
     this.bytes = 0;
     this.header = undefined;
+    this.messageId = undefined;
     this.pending.next(false);
     this.speaking.next(false);
   }
@@ -77,10 +99,13 @@ export class AudioPlaybackService implements OnDestroy {
   private receive(packet: AudioPacket): void {
     switch (packet.type) {
       case 'reset':
-        this.stop();
+        // Reconnection attempts reset the transport, but must not cut a local replay.
+        if (!this.replaying) this.stop();
         break;
       case 'audio_start':
+        if (this.replaying) this.stop();
         this.header = packet;
+        this.messageId = this.store.audioMessage(packet.npc);
         this.chunks = [];
         this.bytes = 0;
         logger.debug('AUDIO', `started ${packet.sample_rate}Hz`);
@@ -98,6 +123,7 @@ export class AudioPlaybackService implements OnDestroy {
       case 'audio_end': {
         if (!this.header || !this.bytes) {
           this.header = undefined;
+          this.messageId = undefined;
           return;
         }
         const data = new Uint8Array(this.bytes);
@@ -106,9 +132,12 @@ export class AudioPlaybackService implements OnDestroy {
           data.set(new Uint8Array(chunk), offset);
           offset += chunk.byteLength;
         }
+        const clip = { data: data.buffer, rate: this.header.sample_rate };
+        if (this.messageId) this.store.attachAudio(this.messageId, clip);
+        this.messageId = undefined;
         // Limit unplayed replies as well as the in-flight buffer.
         if (this.queue.length >= 4) this.queue.shift();
-        this.queue.push({ data: data.buffer, rate: this.header.sample_rate });
+        this.queue.push(clip);
         this.header = undefined;
         this.chunks = [];
         this.bytes = 0;
@@ -128,7 +157,7 @@ export class AudioPlaybackService implements OnDestroy {
     try {
       await this.unlock();
       if (generation !== this.generation || !this.context || !this.gain) return;
-      const item = this.queue.shift();
+      const item = this.queue[0];
       if (!item) {
         this.playing = false;
         return;
@@ -149,15 +178,18 @@ export class AudioPlaybackService implements OnDestroy {
         this.source = undefined;
         this.playing = false;
         this.speaking.next(false);
+        if (!this.queue.length) this.replaying = false;
         if (manual || this.settings.value.autoPlayAudio) void this.playNext(manual);
       };
       source.start();
+      this.queue.shift();
+      this.pending.next(this.queue.length > 0);
     } catch {
       this.playing = false;
       this.speaking.next(false);
       this.pending.next(this.queue.length > 0);
       this.errors$.next(
-        'Impossible de lire cette réponse audio. Touchez « Écouter » pour réessayer.',
+        'Impossible de lire cet enregistrement audio. Touchez « Écouter » pour réessayer.',
       );
     }
   }

@@ -2,6 +2,10 @@ import { Routes } from '@angular/router';
 import { connectionGuard } from './core/guards/connection.guard';
 export const routes: Routes = [
   {
+    path: 'stories',
+    loadComponent: () => import('./features/stories/stories.page').then((m) => m.StoriesPage),
+  },
+  {
     path: 'connection',
     loadComponent: () =>
       import('./features/connection/connection.page').then((m) => m.ConnectionPage),

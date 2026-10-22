@@ -77,6 +77,19 @@
           }
         </form>
       </section>
+      <ion-button expand="block" fill="outline" routerLink="/stories">
+        Histoires de la campagne · Écoute hors connexion
+      </ion-button>
+      @if (histories().length > 0) {
+      <ion-button
+        expand="block"
+        fill="outline"
+        routerLink="/conversation"
+        (click)="ws.disconnect()"
+      >
+        Consulter les conversations hors connexion
+      </ion-button>
+      }
       <p class="privacy-note">
         <ion-icon name="shield-checkmark-outline" /> Votre aventure reste sur votre réseau local.
       </p>

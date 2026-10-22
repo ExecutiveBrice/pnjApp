@@ -1,0 +1,134 @@
+<ion-header class="ion-no-border">
+  <ion-toolbar>
+    <ion-title>Les histoires de la campagne</ion-title>
+    <ion-buttons slot="end">
+      <ion-button routerLink="/conversation">Conversation</ion-button>
+      <ion-button routerLink="/connection">Connexion</ion-button>
+    </ion-buttons>
+  </ion-toolbar>
+</ion-header>
+<ion-content>
+  <main>
+    <p class="eyebrow">LES RÉCITS DE VOTRE UNIVERS</p>
+    <h1>Au fil des <em>histoires.</em></h1>
+    <p class="intro">
+      Écoutez les récits de votre campagne. Téléchargez vos histoires pour les emporter hors
+      connexion.
+    </p>
+    <div class="library-toolbar">
+      @if (stories.libraries().length) {
+      <div class="campaign-select">
+        <label for="campaign">Campagne</label>
+        <select
+          id="campaign"
+          [value]="stories.selectedKey()"
+          (change)="stories.select($any($event.target).value)"
+        >
+          @for (library of stories.libraries(); track library.key) {
+          <option [value]="library.key">{{ label(library.server, library.campaignId) }}</option>
+          }
+        </select>
+      </div>
+      } @if (connection() === 'connected' && (capabilities().voice_design !== undefined ||
+      capabilities().story_generation !== undefined)) {
+      <ion-button fill="outline" (click)="ws.requestStories()">Actualiser les histoires</ion-button>
+      }
+    </div>
+    <p class="library-status" role="status">
+      @if (stories.online()) { Bibliothèque du serveur connecté } @else { Hors connexion · Les
+      histoires téléchargées restent disponibles }
+    </p>
+    @if (stories.error()) {
+    <p class="inline-error" role="alert">{{ stories.error() }}</p>
+    } @if (selectedStory(); as story) {
+    <section class="reader" aria-labelledby="reader-title">
+      <div class="reader-heading">
+        <h2 id="reader-title">{{ story.title }}</h2>
+        <ion-button fill="clear" (click)="close()">Fermer</ion-button>
+      </div>
+      @if (source()) {
+      <audio
+        #player
+        controls
+        preload="metadata"
+        [src]="source()"
+        [attr.aria-label]="'Écouter ' + story.title"
+        (play)="onPlay()"
+        (error)="playbackError.set('Lecture impossible. Vérifiez la connexion ou téléchargez à nouveau cette histoire.')"
+      ></audio>
+      } @else if (!stories.online() && !stories.selected()?.downloaded?.includes(story.id)) {
+      <p class="muted">
+        L’audio de cette histoire n’a pas été téléchargé. Reconnectez-vous au serveur pour
+        l’écouter.
+      </p>
+      } @if (playbackError()) {
+      <p class="inline-error" role="alert">{{ playbackError() }}</p>
+      }
+      <div class="story-text">
+        {{ story.text || 'Aucun texte disponible pour cet enregistrement.' }}
+      </div>
+    </section>
+    }
+    <section class="stories" aria-label="Histoires disponibles">
+      @for (story of stories.selected()?.stories ?? []; track story.id) {
+      <article>
+        <div class="story-info">
+          <h2>{{ story.title }}</h2>
+          <p>{{ duration(story.duration) }} @if (story.language) { · {{ story.language }} }</p>
+          @if (stories.selected()?.downloaded?.includes(story.id)) {
+          <span class="saved">Disponible hors connexion</span>
+          } @else {
+          <span class="muted"
+            >{{ stories.online() ? 'Sur le serveur' : 'Audio non téléchargé' }}</span
+          >
+          }
+        </div>
+        <div class="actions">
+          <ion-button (click)="open(story)"
+            >{{ stories.online() || stories.selected()?.downloaded?.includes(story.id) ? 'Écouter /
+            Lire' : 'Lire le texte' }}</ion-button
+          >
+          @if (stories.selected()?.downloaded?.includes(story.id)) {
+          <ion-button
+            fill="clear"
+            (click)="remove(story)"
+            [attr.aria-label]="'Supprimer la copie locale de ' + story.title"
+            >Supprimer le téléchargement</ion-button
+          >
+          } @else {
+          <ion-button
+            fill="outline"
+            [disabled]="!stories.online() || stories.isDownloading(story.id)"
+            (click)="stories.download(story)"
+            [attr.aria-label]="'Télécharger ' + story.title + ' pour une écoute hors connexion'"
+          >
+            {{ stories.isDownloading(story.id) ? 'Téléchargement…' : 'Télécharger' }}
+          </ion-button>
+          }
+        </div>
+      </article>
+      } @empty {
+      <div class="empty-card">
+        @if (!stories.restored()) { Chargement de la bibliothèque… } @else if (stories.online()) {
+        Aucune histoire enregistrée dans cette campagne. Créez une narration dans le studio vocal du
+        serveur PNJ, ou ajoutez un WAV dans le dossier histoires/ de la campagne. } @else if
+        (connection() === 'connected' && capabilities().voice_design === undefined &&
+        capabilities().story_generation === undefined) { Ce serveur ne propose pas la bibliothèque
+        d’histoires. Mettez le serveur PNJ à jour pour y accéder. } @else { Connectez-vous au
+        serveur PNJ pour découvrir les histoires de votre campagne et les télécharger. }
+      </div>
+      }
+    </section>
+    <p class="storage-note">
+      Les téléchargements sont conservés sur cet appareil. Supprimer une copie locale laisse le
+      fichier de la campagne intact. Effacer les données du navigateur supprime les téléchargements.
+    </p>
+    <p class="storage-note" role="status">
+      @if (offlineApp.ready()) { L’application est prête à être rouverte hors connexion. } @else if
+      (offlineApp.unavailable()) { Gardez cette page ouverte pour écouter hors ligne. Pour rouvrir
+      l’application sans réseau, utilisez l’application installée ou la version de production sur
+      une adresse HTTPS (ou localhost). } @else { Préparation de l’application pour une réouverture
+      hors connexion… }
+    </p>
+  </main>
+</ion-content>

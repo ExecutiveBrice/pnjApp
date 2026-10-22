@@ -8,9 +8,7 @@ import {
   IonButtons,
   IonContent,
   IonFooter,
-  IonHeader,
   IonIcon,
-  IonToolbar,
   ModalController,
   ToastController,
 } from '@ionic/angular';
@@ -31,6 +29,8 @@ import { SettingsService } from '../../core/services/settings.service';
 import { PushToTalkComponent } from '../../shared/components/push-to-talk.component';
 import { ConnectionStatusComponent } from '../../shared/components/connection-status.component';
 import { NpcPickerComponent } from './npc-picker.component';
+import { ConversationStore } from '../../core/services/conversation.store';
+import { ConversationMessage, SpeechNpc } from '../../core/models/protocol';
 
 @Component({
   selector: 'app-conversation',
@@ -43,9 +43,7 @@ import { NpcPickerComponent } from './npc-picker.component';
     IonButtons,
     IonContent,
     IonFooter,
-    IonHeader,
     IonIcon,
-    IonToolbar,
     PushToTalkComponent,
     ConnectionStatusComponent,
   ],
@@ -57,6 +55,7 @@ export class ConversationPage {
   readonly ws = inject(NpcWebSocketService);
   readonly audio = inject(AudioPlaybackService);
   readonly microphone = inject(MicrophoneService);
+  readonly conversations = inject(ConversationStore);
   private readonly settingsService = inject(SettingsService);
   private readonly modal = inject(ModalController);
   private readonly toast = inject(ToastController);
@@ -67,6 +66,11 @@ export class ConversationPage {
     initialValue: this.ws.currentCapabilities,
   });
   readonly messages = toSignal(this.ws.messages$, { initialValue: [] });
+  readonly histories = toSignal(this.conversations.histories$, { initialValue: [] });
+  readonly activeConversation = toSignal(this.conversations.active$, {
+    initialValue: this.conversations.current,
+  });
+  readonly npcs = toSignal(this.ws.npcs$, { initialValue: [] });
   readonly settings = toSignal(this.settingsService.settings$, {
     initialValue: this.settingsService.value,
   });
@@ -74,23 +78,68 @@ export class ConversationPage {
   readonly speaking = toSignal(this.audio.speaking$, { initialValue: false });
   readonly pendingAudio = toSignal(this.audio.pending$, { initialValue: false });
   readonly converting = signal(false);
+  readonly requestingMicrophone = signal(false);
+  readonly speechCatalog = toSignal(this.ws.speechCatalog$, {
+    initialValue: { type: 'gm_npc_list' as const, npcs: [], speech_attitudes: [] },
+  });
+  readonly speechPending = toSignal(this.ws.speechPending$, { initialValue: false });
+  readonly speechTargetId = signal('');
+  readonly speechTarget = computed<SpeechNpc | undefined>(() => {
+    const npcs = this.speechCatalog().npcs;
+    return (
+      npcs.find((npc) => npc.id === this.speechTargetId()) ??
+      npcs.find((npc) => npc.active) ??
+      npcs[0]
+    );
+  });
+  readonly hasSpeechControls = computed(
+    () =>
+      !!this.capabilities().secret_approval &&
+      !!this.speechCatalog().npcs.length &&
+      !!this.speechCatalog().speech_attitudes.length,
+  );
+  readonly displayedNpc = computed(() =>
+    this.hasSpeechControls() ? (this.speechTarget()?.name ?? this.npc()) : this.npc(),
+  );
+  readonly gmNotes = computed(() => {
+    const target = this.hasSpeechControls() ? this.speechTarget() : undefined;
+    if (!target || target.active) return this.activeConversation()?.gmNotes;
+    return this.npcs().find((npc) => npc.id === target.id)?.gm_notes;
+  });
+  readonly secretCount = computed(
+    () => this.gmNotes()?.secret_count ?? this.gmNotes()?.secrets?.length,
+  );
+  private readonly expandedSecrets = signal<string | null>(null);
+  private readonly characterKey = computed(() =>
+    JSON.stringify([
+      this.activeConversation()?.key,
+      this.hasSpeechControls() ? this.speechTarget()?.id : this.npc(),
+    ]),
+  );
+  readonly secretsOpen = computed(() => this.expandedSecrets() === this.characterKey());
+  toggleSecrets(): void {
+    this.expandedSecrets.set(this.secretsOpen() ? null : this.characterKey());
+  }
+  readonly speechDisabled = computed(
+    () =>
+      this.connection() !== 'connected' ||
+      !this.capabilities().secret_approval ||
+      !this.speechTarget() ||
+      this.speechPending() ||
+      this.npcState() !== 'idle' ||
+      this.recording() ||
+      this.requestingMicrophone() ||
+      this.converting() ||
+      this.speaking(),
+  );
   readonly visualState = computed(() =>
     this.recording()
       ? 'recording'
-      : this.converting()
+      : this.converting() || this.speechPending()
         ? 'processing'
         : this.speaking()
           ? 'speaking'
           : this.npcState(),
-  );
-  readonly stateLabel = computed(
-    () =>
-      ({
-        idle: 'À votre écoute',
-        recording: 'Je vous écoute…',
-        processing: 'Réfléchit…',
-        speaking: 'Prend la parole',
-      })[this.visualState()],
   );
   text = '';
   textOpen = false;
@@ -122,25 +171,50 @@ export class ConversationPage {
     this.cancelRecording();
   }
   sendText(): void {
-    if (!this.text.trim() || !this.ws.connected || !this.capabilities().text_input) return;
+    if (
+      !this.text.trim() ||
+      !this.ws.connected ||
+      !this.capabilities().text_input ||
+      this.speechPending()
+    )
+      return;
     void this.audio.unlock().catch(() => undefined);
     if (this.speaking() || this.npcState() === 'speaking') this.stopSpeaking();
     this.ws.say(this.text);
     this.text = '';
   }
+  selectSpeechTarget(id: string): void {
+    if (this.speechDisabled() || !this.speechCatalog().npcs.some((npc) => npc.id === id)) return;
+    this.speechTargetId.set(id);
+    if (this.capabilities().npc_switch) {
+      this.cancelRecording();
+      this.stopSpeaking();
+      this.ws.switchNpc(id);
+    }
+  }
+  speakNpc(attitude: string): void {
+    const target = this.speechTarget();
+    if (this.speechDisabled() || !target) return;
+    void this.audio.unlock().catch(() => undefined);
+    this.ws.speakNpc(target.id, attitude);
+  }
   async startRecording(): Promise<void> {
     const gesture = ++this.gesture;
-    if (!this.ws.connected || !this.capabilities().audio_input) return;
+    if (!this.ws.connected || !this.capabilities().audio_input || this.speechPending()) return;
     void this.audio.unlock().catch(() => undefined);
     if (this.speaking() || this.npcState() === 'speaking') this.stopSpeaking();
+    this.requestingMicrophone.set(true);
     try {
       await this.microphone.start();
     } catch (error: unknown) {
       if (gesture === this.gesture) this.notify(error);
+    } finally {
+      if (gesture === this.gesture) this.requestingMicrophone.set(false);
     }
   }
   async finishRecording(): Promise<void> {
     const gesture = ++this.gesture;
+    this.requestingMicrophone.set(false);
     this.converting.set(true);
     try {
       const pcm = await this.microphone.finish();
@@ -154,14 +228,21 @@ export class ConversationPage {
   cancelRecording(): void {
     ++this.gesture;
     this.microphone.cancel();
+    this.requestingMicrophone.set(false);
     this.converting.set(false);
   }
   stopSpeaking(): void {
     this.audio.stop();
-    this.ws.stopSpeaking();
+    if (this.ws.connected) this.ws.stopSpeaking();
+  }
+  replay(message: ConversationMessage): void {
+    this.cancelRecording();
+    if (this.ws.connected) this.ws.stopSpeaking();
+    void this.audio.replay(message);
   }
   async selectNpc(): Promise<void> {
     this.cancelRecording();
+    this.stopSpeaking();
     const modal = await this.modal.create({
       component: NpcPickerComponent,
       initialBreakpoint: 0.65,

@@ -1,40 +1,104 @@
-<ion-header class="ion-no-border"
-  ><ion-toolbar>
-    <div class="conversation-brand" slot="start">
-      <img src="assets/sigil.svg" alt="" /><span>ÉCHO<small>LA RENCONTRE</small></span>
-    </div>
-    <ion-buttons slot="end"
-      ><ion-button routerLink="/settings" aria-label="Réglages"
-        ><ion-icon slot="icon-only" name="options-outline" /></ion-button
-      ><ion-button (click)="ws.disconnect()" aria-label="Se déconnecter"
-        ><ion-icon slot="icon-only" name="power-outline" /></ion-button
-    ></ion-buttons> </ion-toolbar
-></ion-header>
 <ion-content [scrollY]="true">
   <main class="conversation-main">
-    <section class="character" aria-label="Personnage actif">
-      <div class="eyebrow">DE L’AUTRE CÔTÉ DE LA TABLE</div>
-      <div class="portrait" [class.talking]="visualState() === 'speaking'">
-        <img src="assets/avatar.svg" alt="Silhouette du personnage" /><span class="portrait-mark"
-          >✦</span
+    <section class="gm-notes" aria-labelledby="gm-notes-title">
+      <div class="gm-notes-heading">
+        <div class="gm-notes-character">
+          <p class="eyebrow">DERRIÈRE L’ÉCRAN</p>
+          <h1 id="gm-notes-title">{{ displayedNpc() }}</h1>
+          @if (hasSpeechControls()) {
+          <select
+            id="speech-npc"
+            aria-label="Personnage"
+            [ngModel]="speechTarget()?.id"
+            (ngModelChange)="selectSpeechTarget($event)"
+            [disabled]="speechDisabled()"
+          >
+            @for (target of speechCatalog().npcs; track target.id) {
+            <option [value]="target.id">{{ target.name }} · {{ target.id }}</option>
+            }
+          </select>
+          } @else if ((connection() === 'connected' && capabilities().npc_switch) || (connection()
+          !== 'connected' && histories().length > 0)) {
+          <ion-button class="switch-button" size="small" fill="clear" (click)="selectNpc()"
+            >Changer de personnage<ion-icon slot="end" name="chevron-down-outline"
+          /></ion-button>
+          }
+        </div>
+        <button
+          type="button"
+          class="secret-count"
+          (click)="toggleSecrets()"
+          [attr.aria-expanded]="secretsOpen()"
+          aria-controls="npc-secrets"
+          [attr.aria-label]="'Afficher les secrets de ' + displayedNpc()"
         >
+          <strong>{{ secretCount() ?? '—' }}</strong>
+          <span>{{ secretCount() === 1 ? 'secret' : 'secrets' }}</span>
+          @if (secretCount() === undefined) {
+          <small>Non renseigné</small>
+          }
+        </button>
       </div>
-      <h1>{{ npc() }}</h1>
-      <div class="character-state" role="status">
-        <span [attr.data-state]="visualState()"></span>{{ stateLabel() }}
+      <section
+        id="npc-secrets"
+        class="npc-secrets"
+        [hidden]="!secretsOpen()"
+        aria-label="Secrets du personnage"
+      >
+        @if (gmNotes()?.secrets?.length) {
+        <ol>
+          @for (secret of gmNotes()?.secrets; track $index) {
+          <li>{{ secret }}</li>
+          }
+        </ol>
+        } @else {
+        <p>
+          {{ secretCount() === 0 ? 'Ce personnage n’a aucun secret.' : 'Le serveur n’a pas transmis
+          le contenu des secrets.' }}
+        </p>
+        }
+      </section>
+      <dl class="gm-notes-grid">
+        <div>
+          <dt>Comportement</dt>
+          <dd [class.unspecified]="!gmNotes()?.behavior">
+            {{ gmNotes()?.behavior || 'Non renseigné' }}
+          </dd>
+        </div>
+        <div>
+          <dt>Attitude envers les PJ</dt>
+          <dd [class.unspecified]="!gmNotes()?.attitude">
+            {{ gmNotes()?.attitude || 'Non renseignée' }}
+          </dd>
+        </div>
+        <div>
+          <dt>Motivation</dt>
+          <dd [class.unspecified]="!gmNotes()?.motivation">
+            {{ gmNotes()?.motivation || 'Non renseignée' }}
+          </dd>
+        </div>
+        <div>
+          <dt>Levier de négociation</dt>
+          <dd [class.unspecified]="!gmNotes()?.leverage">
+            {{ gmNotes()?.leverage || 'Non renseigné' }}
+          </dd>
+        </div>
+      </dl>
+      @if (hasSpeechControls()) {
+      <div class="speech-buttons" role="group" aria-label="Faire parler le personnage">
+        @for (attitude of speechCatalog().speech_attitudes; track attitude.id) {
+        <ion-button
+          fill="outline"
+          [disabled]="speechDisabled()"
+          (click)="speakNpc(attitude.id)"
+          [attr.aria-label]="'Faire parler ' + speechTarget()?.name + ' : ' + attitude.label"
+          >{{ attitude.label }}</ion-button
+        >
+        }
       </div>
-      @if (capabilities().npc_switch) {
-      <ion-button class="switch-button" size="small" fill="clear" (click)="selectNpc()"
-        >Changer de personnage<ion-icon slot="end" name="chevron-down-outline"
-      /></ion-button>
       }
     </section>
-    <div class="section-divider">
-      <span></span>
-      <p>LE FIL DE LA CONVERSATION</p>
-      <span></span>
-    </div>
-    @if (settings().showTranscript) {
+    @if (settings().showTranscript || connection() !== 'connected') {
     <section
       class="messages"
       role="log"
@@ -52,9 +116,22 @@
         </div>
         <div class="bubble">
           <p>
-            {{ message.text }}@if (message.streaming) {
+            {{ message.text || (message.speaker === 'player' ? 'Message vocal' : 'Réponse vocale')
+            }}@if (message.streaming) {
             <span class="streaming-cursor" aria-label="Réponse en cours"></span> }
           </p>
+          @if (message.speaker !== 'system') {
+          <ion-button
+            class="replay-button"
+            fill="clear"
+            size="small"
+            [disabled]="!message.audio?.length"
+            (click)="replay(message)"
+            [attr.aria-label]="message.speaker === 'player' ? 'Réécouter votre phrase' : 'Réécouter la réplique de ' + message.npc"
+            [attr.title]="message.audio?.length ? 'Réécouter, même hors connexion' : 'Aucun enregistrement audio disponible pour cette phrase'"
+            ><ion-icon slot="icon-only" name="volume-high-outline"
+          /></ion-button>
+          }
         </div>
       </article>
       } @empty {
@@ -77,24 +154,23 @@
   <div class="conversation-controls">
     @if (pendingAudio()) {
     <ion-button class="listen-button" fill="outline" size="small" (click)="audio.playPending()"
-      ><ion-icon name="volume-high-outline" slot="start" />Écouter la réponse</ion-button
+      ><ion-icon name="volume-high-outline" slot="start" />Écouter l’enregistrement</ion-button
     >
     } @if (speaking() || npcState() === 'speaking') {
     <ion-button fill="clear" size="small" (click)="stopSpeaking()"
       ><ion-icon name="stop-outline" slot="start" />Arrêter la voix</ion-button
     >
-    }
+    } @if (capabilities().audio_input) {
     <app-push-to-talk
       [state]="visualState()"
       [npc]="npc()"
-      [disabled]="!capabilities().audio_input || !microphone.available || connection() !== 'connected'"
+      [disabled]="!capabilities().audio_input || !microphone.available || connection() !== 'connected' || speechPending()"
       (pressed)="startRecording()"
       (released)="finishRecording()"
       (cancelled)="cancelRecording()"
     />
-    @if (!capabilities().audio_input) {
-    <p class="capability-note">Ce serveur ne propose pas encore la capture vocale.</p>
-    } @if (capabilities().text_input) {
+    } @if (capabilities().text_input && connection() === 'connected') { @if
+    (capabilities().audio_input) {
     <button
       type="button"
       class="text-toggle"
@@ -106,7 +182,7 @@
         name="chevron-down-outline"
       />
     </button>
-    @if (textOpen || !capabilities().audio_input) {
+    } @if (textOpen || !capabilities().audio_input) {
     <form id="text-composer" class="text-composer" (ngSubmit)="sendText()">
       <input
         name="text"
@@ -117,14 +193,29 @@
         maxlength="8000"
       /><ion-button
         type="submit"
-        [disabled]="!text.trim() || connection() !== 'connected'"
+        [disabled]="!text.trim() || connection() !== 'connected' || speechPending()"
         aria-label="Envoyer le message"
         ><ion-icon slot="icon-only" name="arrow-up-outline"
       /></ion-button>
     </form>
     } }
     <div class="conversation-bottom">
-      <app-connection-status [state]="connection()" /><span>VOTRE HISTOIRE, VOTRE VOIX</span>
+      <app-connection-status [state]="connection()" />
+      <nav aria-label="Navigation">
+        <ion-buttons>
+          <ion-button routerLink="/stories">Histoires</ion-button>
+          <ion-button routerLink="/settings" aria-label="Réglages">
+            <ion-icon slot="icon-only" name="options-outline" />
+          </ion-button>
+          <ion-button
+            routerLink="/connection"
+            (click)="ws.disconnect()"
+            aria-label="Connexion au serveur"
+          >
+            <ion-icon slot="icon-only" name="power-outline" />
+          </ion-button>
+        </ion-buttons>
+      </nav>
     </div>
   </div>
 </ion-footer>

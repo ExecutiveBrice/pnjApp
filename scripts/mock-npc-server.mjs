@@ -1,21 +1,93 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createServer } from 'node:http';
 
 const port = Number(process.env['PORT'] ?? 8766);
 // Fixtures belong to the mock only; the mobile client has no campaign data.
 const npcs = process.env['NPC_FIXTURES']
   ? JSON.parse(await readFile(process.env['NPC_FIXTURES'], 'utf8'))
   : [
-      { id: 'mordrek', name: 'Mordrek' },
-      { id: 'sentinelle', name: 'La Sentinelle' },
+      {
+        id: 'mordrek',
+        name: 'Mordrek',
+        gm_notes: {
+          behavior: 'Parle à voix basse, observe les issues et répond rarement sans contrepartie.',
+          attitude: 'Méfiant envers les inconnus, cordial avec ceux qui tiennent parole.',
+          motivation: 'Retrouver son frère disparu sans attirer l’attention de la garde.',
+          leverage: 'Une piste fiable ou une promesse de protection pour sa famille.',
+          secret_count: 3,
+          secrets: [
+            'Son frère est retenu dans les caves de l’ancienne douane.',
+            'Il transporte de faux laissez-passer pour les contrebandiers.',
+            'Le capitaine de la garde lui doit une faveur.',
+          ],
+        },
+      },
+      {
+        id: 'sentinelle',
+        name: 'La Sentinelle',
+        gm_notes: {
+          behavior: 'Se tient droite, pose des questions précises et vérifie chaque réponse.',
+          attitude: 'Neutre et professionnelle ; se ferme face aux menaces.',
+          motivation: 'Garder la porte et protéger les habitants du quartier.',
+          leverage: 'Un ordre officiel ou une preuve de danger imminent.',
+          secret_count: 1,
+          secrets: ['Elle laisse passer les familles recherchées à la relève de minuit.'],
+        },
+      },
     ];
 const audioInput = process.env['MOCK_AUDIO_INPUT'] === '1';
 const audioOutput = process.env['MOCK_AUDIO_OUTPUT'] === '1';
 const legacy = process.env['MOCK_LEGACY'] === '1';
+const gm = !legacy && process.env['MOCK_GM'] !== '0';
+const speechAttitudes = [
+  { id: 'agacement', label: 'Agacement' },
+  { id: 'amusant', label: 'Amusant' },
+  { id: 'rude', label: 'Rude' },
+  { id: 'complaisant', label: 'Complaisant' },
+];
+const mockStory = {
+  id: 'e'.repeat(32),
+  title: 'Le feu de camp · Signal de démonstration',
+  text: 'Le feu crépite. Les voyageurs se rassemblent pour écouter le récit.\n\nLe mock joue un signal sonore de deux secondes, sans synthèse vocale.',
+  description: 'Signal sonore de test, sans narration.',
+  language: 'French',
+  created_at: '2026-10-22T12:00:00Z',
+  duration: 2,
+  audio_url: `/studio/audio/${'e'.repeat(32)}.wav`,
+};
+const storyWav = Buffer.alloc(44 + 24000 * 2 * 2);
+storyWav.write('RIFF');
+storyWav.writeUInt32LE(storyWav.length - 8, 4);
+storyWav.write('WAVEfmt ', 8);
+storyWav.writeUInt32LE(16, 16);
+storyWav.writeUInt16LE(1, 20);
+storyWav.writeUInt16LE(1, 22);
+storyWav.writeUInt32LE(24000, 24);
+storyWav.writeUInt32LE(48000, 28);
+storyWav.writeUInt16LE(2, 32);
+storyWav.writeUInt16LE(16, 34);
+storyWav.write('data', 36);
+storyWav.writeUInt32LE(storyWav.length - 44, 40);
+for (let i = 0; i < 48000; i++)
+  storyWav.writeInt16LE(Math.round(Math.sin((i * 2 * Math.PI * 220) / 24000) * 1000), 44 + i * 2);
+const httpServer = createServer((request, response) => {
+  if (request.method !== 'GET' || request.url !== mockStory.audio_url) {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+  response.writeHead(200, {
+    'Content-Type': 'audio/wav',
+    'Content-Length': storyWav.length,
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store',
+  });
+  response.end(storyWav);
+});
 const server = new WebSocketServer({
-  host: '0.0.0.0',
-  port,
+  server: httpServer,
   path: '/ws',
   maxPayload: 2 * 1024 * 1024,
 });
@@ -39,23 +111,37 @@ server.on('connection', (socket) => {
     state = next;
     send({ type: 'state', state });
   };
+  const sendSpeechCatalog = () => {
+    if (gm)
+      send({
+        type: 'gm_npc_list',
+        npcs: npcs.map((item) => ({ id: item.id, name: item.name, active: item.id === npc.id })),
+        speech_attitudes: speechAttitudes,
+      });
+  };
   const hello = { type: 'hello', protocol: 1, npc: npc.name, state };
+  if (!legacy && npc.gm_notes) hello.gm_notes = npc.gm_notes;
   if (!legacy)
     hello.capabilities = {
       text_input: true,
       audio_input: audioInput,
       audio_output: audioOutput,
       npc_switch: true,
+      secret_approval: gm,
+      voice_design: false,
+      story_generation: false,
     };
   send(hello);
   if (!legacy) send({ type: 'npc_list', npcs });
+  sendSpeechCatalog();
 
-  const respond = async (text) => {
+  const respond = async (text, cueReply) => {
     const current = ++turn;
-    send({ type: 'player_spoke', text });
+    if (!cueReply) send({ type: 'player_spoke', text });
     setState('processing');
     await delay(500);
-    const reply = `Bienvenue à la table. Vous me dites « ${text} »… Prenez place, je vous écoute.`;
+    const reply =
+      cueReply ?? `Bienvenue à la table. Vous me dites « ${text} »… Prenez place, je vous écoute.`;
     for (const chunk of reply.match(/.{1,16}/gs) ?? []) {
       if (turn !== current || socket.readyState !== WebSocket.OPEN) return;
       send({ type: 'npc_reply_chunk', npc: npc.name, text: chunk });
@@ -108,13 +194,44 @@ server.on('connection', (socket) => {
       return;
     }
     switch (command.type) {
+      case 'speak_npc': {
+        const target = npcs.find((item) => item.id === command.npc);
+        const attitude = speechAttitudes.find((item) => item.id === command.attitude);
+        if (!gm || !target || !attitude || state !== 'idle' || inputBytes !== null) {
+          send({ type: 'error', message: 'Prise de parole indisponible ou invalide.' });
+          break;
+        }
+        if (target.id !== npc.id) {
+          npc = target;
+          send({ type: 'npc_switched', npc: npc.name, gm_notes: npc.gm_notes });
+          sendSpeechCatalog();
+        }
+        const replies = {
+          agacement: 'Encore cette histoire ? Nous avons assez perdu de temps, venez-en au fait.',
+          amusant: 'Avec une équipe pareille, même les ennuis vont demander un jour de congé !',
+          rude: 'Assez bavardé. Dites ce que vous voulez et laissez-moi travailler.',
+          complaisant: 'Bien sûr, prenez votre temps. Je vais faire de mon mieux pour vous aider.',
+        };
+        void respond('', replies[attitude.id]);
+        break;
+      }
+      case 'studio_list':
+        send({
+          type: 'studio_catalog',
+          available: false,
+          campaign_id: 'd'.repeat(32),
+          voices: [],
+          stories: [mockStory],
+        });
+        break;
       case 'say':
         if (typeof command.text === 'string' && command.text.trim())
           void respond(command.text.trim().slice(0, 8000));
         break;
       case 'status':
-        setState(state);
+        send({ type: 'status', state });
         if (!legacy) send({ type: 'npc_list', npcs });
+        sendSpeechCatalog();
         break;
       case 'stop_speaking':
         ++turn;
@@ -130,7 +247,8 @@ server.on('connection', (socket) => {
         ++turn;
         inputBytes = null;
         npc = next;
-        send({ type: 'npc_switched', npc: npc.name });
+        send({ type: 'npc_switched', npc: npc.name, gm_notes: npc.gm_notes });
+        sendSpeechCatalog();
         setState('idle');
         break;
       }
@@ -165,8 +283,9 @@ server.on('connection', (socket) => {
   });
   socket.on('error', (error) => console.warn(`[MOCK] ${error.message}`));
 });
+httpServer.listen(port, '0.0.0.0');
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.on(signal, () => {
     for (const client of server.clients) client.terminate();
-    server.close(() => process.exit(0));
+    server.close(() => httpServer.close(() => process.exit(0)));
   });

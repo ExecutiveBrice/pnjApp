@@ -1,6 +1,6 @@
 # Écho · Client mobile NPC
 
-Application Ionic 9 / Angular 22 standalone, TypeScript strict, Capacitor 8, RxJS et SCSS. Écho relie les joueurs au WebSocket du serveur `npc`, sans IA ni service cloud côté téléphone. Les ressources visuelles et les polices sont locales. Le client reste utilisable sur le réseau local sans accès Internet après installation.
+Application Ionic 9 / Angular 22 standalone, TypeScript strict, Capacitor 8, RxJS et SCSS. Écho relie le Maître du Jeu au WebSocket du serveur `npc`, sans IA ni service cloud côté téléphone. Les ressources visuelles et les polices sont locales. Le client reste utilisable sur le réseau local sans accès Internet après installation.
 
 ## Installation
 
@@ -55,6 +55,31 @@ NPC_FIXTURES=./mes-pnj.json npm run mock-server
 ```
 
 Format de `mes-pnj.json` : tableau de `{ "id": "identifiant-cote-serveur", "name": "Nom affiché" }` non vide. Arrêter le mock existant avant d’en lancer un autre sur le même port. Les commandes de variables d’environnement ci-dessus sont destinées à macOS/Linux ; sous PowerShell, utiliser par exemple `$env:MOCK_AUDIO_INPUT="1"`.
+
+### Repères pour le Maître du Jeu
+
+L’écran commence par un seul encart « Derrière l’écran » : nom du personnage, sélecteur, comportement, attitude envers les PJ, motivation, levier de négociation et nombre de secrets. Les boutons de prise de parole restent sous ces informations, puis viennent directement les transcriptions. La navigation vers les histoires, les réglages et la connexion est accessible en bas de l’écran. Le serveur peut fournir un objet optionnel `gm_notes` dans `hello`, `npc_switched` ou chaque entrée de `npc_list` (également dans les fixtures du mock) :
+
+```json
+{
+  "behavior": "Parle à voix basse et surveille les issues.",
+  "attitude": "Méfiant, mais sensible aux marques de respect.",
+  "motivation": "Retrouver son frère disparu.",
+  "leverage": "Une piste fiable ou une promesse de protection.",
+  "secret_count": 1,
+  "secrets": ["Son frère est retenu dans les caves de l’ancienne douane."]
+}
+```
+
+Tous les champs sont facultatifs. Le nombre de secrets doit être un entier positif ou nul ; zéro signifie aucun secret, tandis qu’une valeur absente utilise la longueur de `secrets`, ou affiche « Non renseigné » si la liste est également absente. Les champs invalides sont ignorés sans bloquer la connexion. Un appui sur le nombre ouvre ou referme la liste `secrets` (tableau de textes non vides). Si le serveur fournit uniquement le nombre, l’encart indique que le contenu n’a pas été transmis. Ces repères sont conservés avec l’historique local du PNJ et du serveur pour rester consultables hors connexion. Ils restent inchangés si un ancien serveur ne les envoie pas ; envoyer `gm_notes: {}` permet de les effacer. Les repères sont destinés à une interface consultée par le MJ, sans contrôle d’accès distinct.
+
+### Faire parler un PNJ
+
+Dans l’encart « Derrière l’écran », le sélecteur sous le nom permet au MJ de choisir un personnage, de consulter immédiatement ses informations, puis de déclencher **Agacement**, **Amusant**, **Rude** ou **Complaisant**. Le serveur fournit les personnages et les attitudes disponibles ; l’attitude vaut pour cette seule réplique. Choisir un autre personnage affiche immédiatement ses informations et sélectionne sa conversation si le serveur prend en charge `npc_switch`. La prise de parole se déclenche uniquement avec un bouton. La commande `speak_npc` cible son identifiant exact et laisse le serveur sélectionner le PNJ, sans demander d’accueil supplémentaire ni ajouter de message joueur. Sa réponse et son audio suivent l’historique et la réécoute habituels.
+
+Cette zone apparaît uniquement si le `hello` annonce `capabilities.secret_approval: true` et si `gm_npc_list` fournit `npcs` (`id`, `name`, `active`) et `speech_attitudes` (`id`, `label`). Activer l’accès MJ mobile (`mobile.secret_approval`) sur le serveur PNJ pour l’utiliser. Un ancien serveur ou une connexion joueur conserve les commandes habituelles. Les boutons attendent la fin d’une réplique, d’un enregistrement ou de sa conversion ; un verrou immédiat évite les doubles appuis avant la réponse du serveur. Une erreur libère ce verrou et s’affiche dans le Toast habituel. Les listes MJ sont vidées à la déconnexion.
+
+Le mock propose ces quatre boutons par défaut, y compris avec `MOCK_AUDIO_OUTPUT=1` pour tester le transport audio. `MOCK_GM=0 npm run mock-server` simule une connexion joueur sans ces commandes, et `MOCK_LEGACY=1` garde le comportement ancien.
 
 ## Build et vérifications
 
@@ -137,9 +162,31 @@ Autoriser le micro et le réseau local lors des demandes iOS. `NSAllowsLocalNetw
 
 La V1 attend `audio_end` avant de lire. Les réponses sont mises en file et jouées séquentiellement ; la lecture réellement streaming pourra se concentrer dans ce service. Le tampon courant est limité à 32 Mio et la file à quatre réponses. Sans geste utilisateur préalable, ou si la lecture automatique est désactivée, le bouton **Écouter la réponse** permet de lancer la lecture. Le réglage de volume agit sur un `GainNode`.
 
+Chaque réplique de PNJ et chaque message vocal du joueur dispose aussi d’un bouton **haut-parleur** pour la réécouter. Les clips PCM complets reçus du serveur sont associés à leur bulle dès `audio_start`, puis enregistrés avec leur fréquence dans **IndexedDB**. Plusieurs clips d’une même réplique sont relus dans l’ordre. La réécoute reste disponible après lecture, changement de PNJ, déconnexion et réouverture de l’application installée. Le bouton reste désactivé si aucun audio n’a été reçu : le client ne synthétise pas de voix à partir du texte. Un audio PNJ interrompu avant `audio_end` n’est pas sauvegardé.
+
+La voix du joueur est conservée localement en PCM mono **16000 Hz** dès la fin de sa capture, avant l’envoi au serveur. Elle reste réécoutable si cet envoi échoue et même si aucune transcription n’est reçue (bulle **Message vocal**). Quand le serveur envoie `player_spoke`, le texte complète la même bulle sans dupliquer le message ni perdre son audio. Ces enregistrements suivent la conversation du PNJ sélectionné et persistent après fermeture, comme les voix des PNJ. Les messages saisis au clavier restent conservés sous forme de texte ; leur haut-parleur est désactivé faute d’enregistrement vocal.
+
 Pendant `speaking` ou une lecture locale, appuyer sur le micro envoie d’abord `stop_speaking`, arrête et vide l’audio local, puis demande le micro. L’arrêt, le changement de PNJ et la déconnexion invalident aussi les lectures en attente. Le protocole n’ayant pas d’identifiant de tour, le serveur doit cesser de produire l’ancienne réponse après `stop_speaking` ; un nouvel `audio_start` est considéré comme une nouvelle réponse.
 
 Le mock sonore valide le transport PCM, **pas l’intelligibilité d’une voix Piper**. La lecture d’un vrai flux Piper et les permissions sur appareils physiques Android/iOS restent à valider avec votre serveur et vos appareils.
+
+## Histoires de campagne et écoute hors connexion
+
+Depuis la conversation, ouvrir **Histoires** ; depuis l’accueil, utiliser **Histoires de la campagne · Écoute hors connexion**. Le catalogue est demandé au serveur après connexion et peut être actualisé. Il fonctionne même si Qwen3-TTS n’est pas installé : la synthèse n’est pas nécessaire pour écouter les fichiers existants.
+
+Le serveur PNJ fournit les histoires déjà narrées dans `histoires/` (WAV et texte Markdown associé), ainsi que les anciennes bibliothèques `voice_studio/`. Les textes sans WAV doivent d’abord être narrés dans le studio du serveur. **Écouter / Lire** ouvre le texte et le lecteur audio : lecture, pause et déplacement dans l’enregistrement. Le texte s’affiche comme texte brut. Une seule histoire est lue à la fois et quitter l’écran arrête sa lecture.
+
+**Télécharger** conserve le WAV complet et ses métadonnées dans IndexedDB. Le statut **Disponible hors connexion** apparaît après validation du fichier et confirmation de son stockage. Les téléchargements interrompus, les erreurs HTTP, les réponses partielles et les WAV tronqués ne sont pas enregistrés. **Supprimer le téléchargement** efface uniquement la copie de cet appareil. Chaque bibliothèque est isolée par adresse serveur et `campaign_id` ; le sélecteur permet de retrouver les campagnes conservées, même sans serveur. Les histoires téléchargées restent conservées si elles disparaissent du catalogue du PC.
+
+Pour préparer le hors-ligne :
+
+1. Ouvrir le build de production via **HTTPS ou localhost** (ou installer l’application Capacitor), puis se connecter au serveur PNJ.
+2. Télécharger les histoires souhaitées et attendre **Disponible hors connexion**. Dans le navigateur, attendre aussi **L’application est prête à être rouverte hors connexion**.
+3. L’application peut ensuite être rechargée sans serveur web ni serveur PNJ. Les histoires téléchargées se lisent depuis leur copie locale ; le texte du catalogue reste consultable pour les autres.
+
+`npm run build` génère `www/offline-sw.js` avec la liste et l’empreinte des ressources compilées, y compris les routes chargées à la demande. Le service worker conserve l’interface et sert les navigations vers les écrans sans réseau. Une nouvelle version prend la relève après fermeture des onglets de l’ancienne version. Le développement (`npm start`) ne l’active pas ; en HTTP sur une IP LAN, garder la page ouverte ou utiliser l’application native pour l’écoute hors connexion. Le stockage reste propre à l’origine du site et peut être supprimé par le navigateur ou l’utilisateur.
+
+Le protocole utilise `studio_list` → `studio_catalog` (`campaign_id`, `stories`) et `GET /studio/audio/<id>.wav`. Les téléchargements depuis une autre origine nécessitent les en-têtes CORS des réponses WAV du serveur PNJ. Avec un proxy, exposer ce chemin HTTP sur la même origine que l’adresse WebSocket ; une page HTTPS requiert un serveur WSS/HTTPS. Le mock fournit une histoire de démonstration avec un signal WAV de deux secondes pour vérifier téléchargement, persistance et lecture sans moteur vocal.
 
 ## Protocole et état
 
@@ -149,7 +196,9 @@ Le mock sonore valide le transport PCM, **pas l’intelligibilité d’une voix 
 - `say`, `switch_npc`, `stop_speaking`, `status`, états et événements texte/audio du cahier des charges sont implémentés. `status` est demandé après chaque `hello`.
 - Reconnexion après 1, 2, 5, 10 puis 10 secondes ; attente d’un nouveau `hello`, réinitialisation des capacités et de la liste. L’arrêt explicite ou la désactivation du réglage interrompt les tentatives.
 - La modal utilise `npc_list`. En l’absence de liste, un identifiant fourni par le MJ peut être saisi si `npc_switch` est autorisé. Le nom actif change à réception de `npc_switched`.
-- Historique limité aux 500 dernières bulles en mémoire, sans persistance des conversations. Ajout immédiat du texte joueur, dédoublonnage de son écho `player_spoke`, puis concaténation des chunks PNJ dans une bulle. Une réponse finale sans chunks est également acceptée.
+- Historique séparé par **adresse WebSocket et PNJ confirmé par le serveur**, limité aux 500 dernières bulles par conversation. Changer de PNJ affiche uniquement ses échanges ; revenir au PNJ précédent retrouve son historique. Le protocole V1 identifie le PNJ par le champ `npc` de `hello` / `npc_switched` (nom dans le mock) : deux noms identiques sur un même serveur ne sont pas distinguables sans enrichir le protocole.
+- Conversations et enregistrements conservés localement dans **IndexedDB**, sans transfert cloud. Ajout immédiat du texte joueur, dédoublonnage de son écho `player_spoke`, puis concaténation des chunks PNJ dans une bulle. Une réponse finale sans chunks est également acceptée. Les fichiers audio restent soumis à l’espace disponible sur l’appareil ; une erreur de stockage est signalée et les échanges restent accessibles en mémoire pendant la session.
+- Une perte de connexion laisse la conversation ouverte avec la réécoute disponible et les envois désactivés. Depuis l’écran de connexion, **Consulter les conversations hors connexion** ouvre les historiques sauvegardés ; **Changer de personnage** permet de choisir une conversation locale. Dans l’application Capacitor installée ou le build web de production préparé pour le hors-ligne, ces écrans fonctionnent sans réseau. Le serveur de développement web doit rester accessible pour recharger les fichiers de l’application dans le navigateur.
 - `SettingsService` encapsule `localStorage` et valide les préférences relues. Adresse, port, reconnexion, lecture automatique, transcription et volume y sont stockés. L’interface continue de fonctionner si le stockage est indisponible et informe de l’échec de sauvegarde.
 
 ## Organisation
@@ -160,7 +209,11 @@ src/app/
     models/protocol.ts              Types discriminés et validation à réception
     services/
       npc-websocket.service.ts     Transport, handshake, capacités, reconnexion
-      conversation.store.ts        Historique et réponses progressives
+      conversation.store.ts        Historiques par PNJ et réponses progressives
+      conversation-history.service.ts Persistance IndexedDB du texte et des voix
+      stories.service.ts           Bibliothèques, téléchargements et lecture des histoires
+      story-storage.service.ts     Catalogue et WAV par campagne dans IndexedDB
+      offline-app.service.ts       Préparation de l’interface web hors connexion
       audio-playback.service.ts    Tampons PCM, file, volume, interruption
       microphone.service.ts        Capture locale, décodage et PCM 16 kHz
       settings.service.ts          Préférences locales
@@ -168,15 +221,18 @@ src/app/
   features/
     connection/                    Adresse et connexion au serveur
     conversation/                  PNJ actif, bulles, voix et modal de sélection
+    stories/                       Catalogue, lecteur et téléchargements de campagne
     settings/                      Préférences utilisateur
   shared/
     components/                    Push-to-talk et statut de connexion
     utils/                         Endpoint, conversions PCM et logger
   app.component.ts                 Routage après connexion/coupure et Toasts
   app.routes.ts                    Routes chargées à la demande
-src/assets/                        Avatar et emblème SVG locaux
+src/assets/                        Ressources SVG locales (emblème)
 scripts/mock-npc-server.mjs         Mock facultatif (seule dépendance : ws)
 scripts/configure-native.mjs        Permissions natives et exceptions LAN ciblées
+scripts/build-offline.mjs           Manifeste du build et génération du service worker
+src/offline-worker.js               Cache de l’interface de production
 ```
 
 Tous les composants de l’application sont standalone ; `FormsModule` est utilisé uniquement pour les directives de formulaires Angular. Avec Ionic 9, les composants standalone s’importent depuis `@ionic/angular` (le sous-chemin `/standalone` d’Ionic 8 a été supprimé).

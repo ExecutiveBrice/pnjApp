@@ -4,6 +4,8 @@ import { AudioPlaybackService } from './audio-playback.service';
 import { NpcWebSocketService } from './npc-websocket.service';
 import { SettingsService } from './settings.service';
 import { AudioPacket } from '../models/protocol';
+import { ConversationStore } from './conversation.store';
+import { MemoryHistory } from '../../../../tests/conversation-history';
 
 class FakeContext {
   static instances: FakeContext[] = [];
@@ -47,6 +49,8 @@ describe('AudioPlaybackService', () => {
   let audio: AudioPlaybackService;
   let settings: SettingsService;
   let packets: Subject<AudioPacket>;
+  let store: ConversationStore;
+  let history: MemoryHistory;
   const start = (): void =>
     packets.next({
       type: 'audio_start',
@@ -64,9 +68,13 @@ describe('AudioPlaybackService', () => {
     FakeContext.instances = [];
     packets = new Subject();
     settings = new SettingsService();
+    history = new MemoryHistory();
+    store = new ConversationStore(history);
+    store.select('ws://table/ws', 'Test');
     audio = new AudioPlaybackService(
       { audio$: packets.asObservable() } as NpcWebSocketService,
       settings,
+      store,
     );
   });
   afterEach(() => {
@@ -150,5 +158,112 @@ describe('AudioPlaybackService', () => {
     end();
     await Promise.resolve();
     expect(error).toHaveBeenCalledOnce();
+  });
+  it('replays a saved reply repeatedly after transport reset with no network access', async () => {
+    settings.update({ autoPlayAudio: false });
+    store.reply('Test', 'Une voix', true);
+    start();
+    chunk([0, 128, 255, 127]);
+    end();
+    const reply = store.value[0];
+    packets.next({ type: 'reset' });
+    await audio.replay(reply);
+    await audio.replay(reply);
+    const context = FakeContext.instances[0];
+    expect(context.sources).toHaveLength(2);
+    expect(context.sources[0].stop).toHaveBeenCalledOnce();
+    expect(context.createBuffer).toHaveBeenLastCalledWith(1, 2, 22050);
+    expect(reply.audio).toHaveLength(1);
+  });
+  it('replays persisted audio after service recreation and serializes sentence clips', async () => {
+    settings.update({ autoPlayAudio: false });
+    await store.ready;
+    store.reply('Test', 'Deux phrases', true);
+    start();
+    chunk([0, 0]);
+    end();
+    start();
+    chunk([255, 127]);
+    end();
+    await vi.waitFor(() => expect(history.saved.size).toBe(1));
+    audio.ngOnDestroy();
+    const restored = new ConversationStore(history);
+    await restored.ready;
+    audio = new AudioPlaybackService(
+      { audio$: new Subject<AudioPacket>().asObservable() } as NpcWebSocketService,
+      settings,
+      restored,
+    );
+    await audio.replay(restored.value[0]);
+    const context = FakeContext.instances.at(-1)!;
+    expect(context.sources).toHaveLength(1);
+    context.sources[0].onended?.();
+    await Promise.resolve();
+    expect(context.sources).toHaveLength(2);
+  });
+  it('keeps a recording on its original reply when a later message arrives', () => {
+    settings.update({ autoPlayAudio: false });
+    store.reply('Test', 'Première réplique', true);
+    start();
+    chunk([0, 0]);
+    store.player('Deuxième question');
+    store.reply('Test', 'Deuxième réplique', true);
+    end();
+    expect(store.value[0].audio).toHaveLength(1);
+    expect(store.value[2].audio).toBeUndefined();
+  });
+  it('keeps saved audio when an unfinished recording is cancelled', () => {
+    settings.update({ autoPlayAudio: false });
+    store.reply('Test', 'Complète', true);
+    start();
+    chunk([0, 0]);
+    end();
+    store.player('Suite');
+    start();
+    chunk([0, 0]);
+    packets.next({ type: 'reset' });
+    end();
+    expect(store.value[0].audio).toHaveLength(1);
+    expect(store.value.at(-1)?.audio).toBeUndefined();
+  });
+  it('does not cut offline replays during automatic reconnection attempts', async () => {
+    settings.update({ autoPlayAudio: false });
+    store.reply('Test', 'Une longue réplique', true);
+    start();
+    chunk([0, 0]);
+    end();
+    await audio.replay(store.value[0]);
+    const context = FakeContext.instances[0];
+    packets.next({ type: 'reset' });
+    packets.next({ type: 'reset' });
+    expect(context.sources[0].stop).not.toHaveBeenCalled();
+    store.select('ws://table/ws', 'Other');
+    expect(context.sources[0].stop).toHaveBeenCalledOnce();
+  });
+  it('replays the persisted player voice offline after closing and reopening the application', async () => {
+    settings.update({ autoPlayAudio: false });
+    await store.ready;
+    store.playerRecording(new Uint8Array([0, 128, 255, 127]).buffer);
+    store.player('La phrase du joueur');
+    await vi.waitFor(() => expect(history.saved.size).toBe(1));
+    audio.ngOnDestroy();
+    const restored = new ConversationStore(history);
+    await restored.ready;
+    audio = new AudioPlaybackService(
+      { audio$: new Subject<AudioPacket>().asObservable() } as NpcWebSocketService,
+      settings,
+      restored,
+    );
+    await audio.replay(restored.value[0]);
+    await audio.replay(restored.value[0]);
+    const context = FakeContext.instances.at(-1)!;
+    expect(context.sources).toHaveLength(2);
+    expect(context.sources[0].stop).toHaveBeenCalledOnce();
+    expect(context.createBuffer).toHaveBeenLastCalledWith(1, 2, 16000);
+    expect([...context.createBuffer.mock.results[0].value.copyToChannel.mock.calls[0][0]]).toEqual([
+      -1,
+      32767 / 32768,
+    ]);
+    expect(restored.value[0].text).toBe('La phrase du joueur');
   });
 });

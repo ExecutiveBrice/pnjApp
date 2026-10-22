@@ -7,6 +7,9 @@ import { NpcWebSocketService } from './core/services/npc-websocket.service';
 import { AudioPlaybackService } from './core/services/audio-playback.service';
 import { MicrophoneService } from './core/services/microphone.service';
 import { SettingsService } from './core/services/settings.service';
+import { ConversationStore } from './core/services/conversation.store';
+import { StoriesService } from './core/services/stories.service';
+import { OfflineAppService } from './core/services/offline-app.service';
 
 @Component({
   selector: 'app-root',
@@ -16,14 +19,17 @@ import { SettingsService } from './core/services/settings.service';
 })
 export class AppComponent {
   constructor() {
+    inject(StoriesService);
+    inject(OfflineAppService);
     const ws = inject(NpcWebSocketService);
     const audio = inject(AudioPlaybackService);
     const microphone = inject(MicrophoneService);
     const settings = inject(SettingsService);
+    const conversations = inject(ConversationStore);
     const router = inject(Router);
     const toast = inject(ToastController);
     const destroy = inject(DestroyRef);
-    merge(ws.errors$, audio.errors$, settings.errors$)
+    merge(ws.errors$, audio.errors$, settings.errors$, conversations.errors$)
       .pipe(takeUntilDestroyed(destroy))
       .subscribe((message) => {
         void toast
@@ -39,12 +45,9 @@ export class AppComponent {
     ws.connectionState$.pipe(takeUntilDestroyed(destroy)).subscribe((state) => {
       if (state !== 'connected') {
         microphone.cancel();
-        audio.stop();
       }
       if (state === 'connected' && router.url.startsWith('/connection'))
         void router.navigateByUrl('/conversation', { replaceUrl: true });
-      if (state !== 'connected' && router.url.startsWith('/conversation'))
-        void router.navigateByUrl('/connection', { replaceUrl: true });
     });
   }
 }
