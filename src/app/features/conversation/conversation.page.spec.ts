@@ -9,7 +9,13 @@ import { MicrophoneService } from '../../core/services/microphone.service';
 import { ConversationStore } from '../../core/services/conversation.store';
 import { SettingsService } from '../../core/services/settings.service';
 import { SavedConversation } from '../../core/services/conversation-history.service';
-import { Capabilities, ConnectionState, Npc, NpcState } from '../../core/models/protocol';
+import {
+  Capabilities,
+  ConnectionState,
+  GmNpcListEvent,
+  Npc,
+  NpcState,
+} from '../../core/models/protocol';
 
 describe('ConversationPage speech cues', () => {
   const catalog = {
@@ -18,7 +24,6 @@ describe('ConversationPage speech cues', () => {
       { id: 'village/guide', name: 'Guide', active: true },
       { id: 'foret/guide', name: 'Guide', active: false },
     ],
-    speech_attitudes: [{ id: 'amusant', label: 'Amusant' }],
   };
   let page: ConversationPage;
   let recording: BehaviorSubject<boolean>;
@@ -26,13 +31,14 @@ describe('ConversationPage speech cues', () => {
   let pending: BehaviorSubject<boolean>;
   let state: BehaviorSubject<NpcState>;
   let connection: BehaviorSubject<ConnectionState>;
-  let speechCatalog: BehaviorSubject<typeof catalog>;
+  let speechCatalog: BehaviorSubject<GmNpcListEvent>;
   let npcs: BehaviorSubject<Npc[]>;
   let active: BehaviorSubject<SavedConversation | undefined>;
   let switchNpc: ReturnType<typeof vi.fn>;
   let capabilities: BehaviorSubject<Capabilities>;
   let speakNpc: ReturnType<typeof vi.fn>;
   let start: ReturnType<typeof vi.fn>;
+  let requestNpcSecrets: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     recording = new BehaviorSubject(false);
@@ -40,7 +46,7 @@ describe('ConversationPage speech cues', () => {
     pending = new BehaviorSubject(false);
     state = new BehaviorSubject<NpcState>('idle');
     connection = new BehaviorSubject<ConnectionState>('connected');
-    speechCatalog = new BehaviorSubject(catalog);
+    speechCatalog = new BehaviorSubject<GmNpcListEvent>(catalog);
     npcs = new BehaviorSubject<Npc[]>([
       { id: 'village/guide', name: 'Guide', gm_notes: { behavior: 'Accueillant' } },
       {
@@ -60,6 +66,7 @@ describe('ConversationPage speech cues', () => {
     speakNpc = vi.fn();
     switchNpc = vi.fn();
     start = vi.fn().mockResolvedValue(true);
+    requestNpcSecrets = vi.fn();
     capabilities = new BehaviorSubject<Capabilities>({
       secret_approval: true,
       text_input: true,
@@ -87,6 +94,7 @@ describe('ConversationPage speech cues', () => {
             connected: true,
             speakNpc,
             switchNpc,
+            requestNpcSecrets,
             stopSpeaking: vi.fn(),
           },
         },
@@ -129,12 +137,25 @@ describe('ConversationPage speech cues', () => {
     expect(page.speechTarget()?.id).toBe('village/guide');
     page.selectSpeechTarget('foret/guide');
     expect(speakNpc).not.toHaveBeenCalled();
-    page.speakNpc('amusant');
-    expect(speakNpc).toHaveBeenCalledWith('foret/guide', 'amusant');
+    page.speakNpc('greeting');
+    expect(speakNpc).toHaveBeenCalledWith('foret/guide', 'greeting');
     speechCatalog.next({ ...catalog, npcs: [catalog.npcs[0]] });
     expect(page.speechTarget()?.id).toBe('village/guide');
     speechCatalog.next({ ...catalog, npcs: [] });
     expect(page.speechDisabled()).toBe(true);
+  });
+
+  it('sends each speech action with only the selected NPC', () => {
+    expect(page.speechActions.map((action) => action.label)).toEqual([
+      'Présentation',
+      'Meubler pour attendre',
+      'Salutation',
+    ]);
+    for (const action of page.speechActions) {
+      page.speakNpc(action.id);
+      expect(speakNpc).toHaveBeenLastCalledWith('village/guide', action.id);
+    }
+    expect(page.hasSpeechControls()).toBe(true);
   });
 
   it('shows the selected NPC notes immediately and opens only that character’s secrets', () => {
@@ -155,6 +176,36 @@ describe('ConversationPage speech cues', () => {
     npcs.next([]);
     expect(page.gmNotes()).toBeUndefined();
     expect(speakNpc).not.toHaveBeenCalled();
+  });
+
+  it('displays the selected GM card and fetches its secrets by ID without triggering speech', () => {
+    speechCatalog.next({
+      ...catalog,
+      npcs: catalog.npcs.map((npc, index) => ({
+        ...npc,
+        description: index ? 'Le guide de la forêt.' : 'Le guide du village.',
+        gm_notes: index
+          ? { scenario: 'Forêt', attitude: 'Méfiant', leverage: 'Du charbon', secret_count: 2 }
+          : { scenario: 'Village', secret_count: 0 },
+      })),
+    });
+    expect(page.gmNotes()?.scenario).toBe('Village');
+    page.selectSpeechTarget('foret/guide');
+    expect(page.displayedCharacter()?.description).toBe('Le guide de la forêt.');
+    expect(page.gmNotes()).toEqual({
+      scenario: 'Forêt',
+      attitude: 'Méfiant',
+      leverage: 'Du charbon',
+      secret_count: 2,
+    });
+    page.toggleSecrets();
+    expect(requestNpcSecrets).toHaveBeenCalledExactlyOnceWith('foret/guide');
+    page.toggleSecrets();
+    expect(requestNpcSecrets).toHaveBeenCalledTimes(1);
+    expect(speakNpc).not.toHaveBeenCalled();
+    connection.next('disconnected');
+    page.toggleSecrets();
+    expect(requestNpcSecrets).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the offline character’s notes and secrets available without speech controls', () => {
@@ -193,20 +244,20 @@ describe('ConversationPage speech cues', () => {
     const blockers = [recording, speaking, pending];
     for (const blocker of blockers) {
       blocker.next(true);
-      page.speakNpc('amusant');
+      page.speakNpc('greeting');
       expect(page.speechDisabled()).toBe(true);
       blocker.next(false);
     }
     page.converting.set(true);
-    page.speakNpc('amusant');
+    page.speakNpc('greeting');
     page.converting.set(false);
     for (const busy of ['recording', 'processing', 'speaking'] as const) {
       state.next(busy);
-      page.speakNpc('amusant');
+      page.speakNpc('greeting');
     }
     state.next('idle');
     connection.next('disconnected');
-    page.speakNpc('amusant');
+    page.speakNpc('greeting');
     expect(speakNpc).not.toHaveBeenCalled();
     connection.next('connected');
     expect(page.speechDisabled()).toBe(false);
@@ -222,7 +273,7 @@ describe('ConversationPage speech cues', () => {
     );
     const capture = page.startRecording();
     expect(page.speechDisabled()).toBe(true);
-    page.speakNpc('amusant');
+    page.speakNpc('greeting');
     expect(speakNpc).not.toHaveBeenCalled();
     page.cancelRecording();
     grant(false);

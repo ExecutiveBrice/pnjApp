@@ -23,6 +23,7 @@ export class ConversationStore {
   private pendingPlayerRecordings: string[] = [];
   private storageErrorReported = false;
   private sequence = 0;
+  private persistence: Promise<void> = Promise.resolve();
 
   constructor(private readonly history: ConversationHistoryService) {
     this.ready = this.restore();
@@ -143,6 +144,19 @@ export class ConversationStore {
     this.pendingPlayerRecordings = [];
     this.update([]);
   }
+  /** Call after stopping the transport so late events cannot recreate history. */
+  async clearAll(): Promise<void> {
+    await this.ready;
+    this.pendingPlayerId = undefined;
+    this.pendingPlayerRecordings = [];
+    this.conversations.clear();
+    this.selection.next(undefined);
+    this.publish();
+    // Drain writes already in flight before deleting the persisted histories.
+    await this.persistence;
+    await this.history.clear();
+    this.storageErrorReported = false;
+  }
   private add(message: Omit<ConversationMessage, 'id' | 'timestamp'>, persist = true): string {
     // randomUUID is unavailable on plain HTTP LAN origins.
     const id =
@@ -158,8 +172,12 @@ export class ConversationStore {
     this.selection.next(conversation);
     this.publish();
     if (persist) {
-      void this.ready
-        .then(() => this.history.save(this.conversations.get(conversation.key)!))
+      this.persistence = this.persistence
+        .then(async () => {
+          await this.ready;
+          const saved = this.conversations.get(conversation.key);
+          if (saved) await this.history.save(saved);
+        })
         .catch(() => this.storageError());
     }
   }

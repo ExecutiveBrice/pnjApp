@@ -5,6 +5,7 @@
         [routerLink]="ws.connected ? '/conversation' : '/connection'"
         aria-label="Retour"
         class="back-button"
+        [disabled]="resetting"
         ><ion-icon slot="icon-only" name="arrow-back-outline" /></ion-button></ion-buttons
     ><ion-title>Réglages</ion-title></ion-toolbar
   ></ion-header
@@ -86,9 +87,30 @@
       @if (error) {
       <p class="inline-error" role="alert">{{ error }}</p>
       }
-      <ion-button type="submit" expand="block" class="save-button"
+      <ion-button type="submit" expand="block" class="save-button" [disabled]="resetting"
         >Enregistrer les préférences</ion-button
       >
     </form>
+    <h2>SESSION</h2>
+    <section class="settings-card" [attr.aria-busy]="resetting">
+      <p class="muted">
+        Supprime tous les échanges et enregistrements conservés sur cet appareil et demande à
+        l’application PNJ de vider le dossier session de la campagne active.
+      </p>
+      <ion-button
+        type="button"
+        expand="block"
+        color="danger"
+        fill="outline"
+        [disabled]="resetting || !ws.connected"
+        (click)="confirmSessionReset()"
+        >{{ resetting ? 'Réinitialisation…' : 'Réinitialiser la session' }}</ion-button
+      >
+      @if (!ws.connected) {
+      <p class="muted">Connectez-vous au serveur PNJ pour réinitialiser la session.</p>
+      } @if (resetError) {
+      <p class="inline-error" role="alert">{{ resetError }}</p>
+      }
+    </section>
   </main>
 </ion-content>

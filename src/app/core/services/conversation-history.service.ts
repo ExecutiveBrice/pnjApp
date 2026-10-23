@@ -35,6 +35,16 @@ export class ConversationHistoryService {
     });
   }
 
+  async clear(): Promise<void> {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction('conversations', 'readwrite');
+      transaction.objectStore('conversations').clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = transaction.onerror = () => reject(transaction.error);
+    });
+  }
+
   private open(): Promise<IDBDatabase> {
     this.database ??= new Promise((resolve, reject) => {
       const request = indexedDB.open('npc.conversations.v1', 1);

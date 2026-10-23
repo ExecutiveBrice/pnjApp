@@ -87,6 +87,112 @@ describe('mock MJ secret approvals over a real WebSocket', () => {
     expect(hello['capabilities']).toMatchObject({ secret_approval: true });
     return client;
   }
+  it('acknowledges session reset, cancels replies and clears shared secret requests', async () => {
+    const client = await connect();
+    const observer = await connect();
+    client.send({ type: 'say', text: 'Quel est ton secret ?' });
+    await client.wait('secret_disclosure_requested');
+    client.send({ type: 'say', text: 'Une réponse à interrompre' });
+    await client.wait('state');
+    const after = client.events.length;
+    client.send({ type: 'reset_session' });
+    await client.wait('session_reset', after);
+    client.send({ type: 'status' });
+    expect(await client.wait('secret_disclosure_list', after)).toMatchObject({ requests: [] });
+    expect(await client.wait('status', after)).toMatchObject({ state: 'idle' });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(client.events.slice(after).some((event) => event['type'] === 'npc_reply_chunk')).toBe(
+      false,
+    );
+    observer.send({ type: 'status' });
+    const marker = observer.events.length;
+    expect(await observer.wait('secret_disclosure_list', marker)).toMatchObject({ requests: [] });
+  });
+  it('sends flat GM cards and returns secrets only when requested for a specific NPC', async () => {
+    const client = await connect();
+    const cards = await client.wait('gm_npc_list');
+    expect(cards).not.toHaveProperty('speech_attitudes');
+    expect(cards['npcs']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'sentinelle',
+          active: false,
+          secret_count: 1,
+          scenario: expect.any(String),
+          negotiation: expect.any(String),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(cards)).not.toContain('Elle laisse passer les familles');
+    const hello = await client.wait('hello');
+    expect(hello['gm_notes']).toBeUndefined();
+    client.send({ type: 'get_npc_secrets', npc: 'sentinelle' });
+    expect(await client.wait('gm_npc_secrets')).toMatchObject({
+      id: 'sentinelle',
+      secrets: [{ body: expect.any(String), hint: '', status: 'locked' }],
+    });
+    expect(client.events.some((event) => event['type'] === 'npc_switched')).toBe(false);
+    expect(client.events.some((event) => event['type'] === 'npc_replied')).toBe(false);
+  });
+  it('switches NPC silently and speaks only after an explicit action', async () => {
+    const client = await connect();
+    const after = client.events.length;
+    client.send({ type: 'switch_npc', npc: 'sentinelle', silent: true });
+    expect(await client.wait('npc_switched', after)).toMatchObject({ npc: 'La Sentinelle' });
+    await client.wait('state', after);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    expect(
+      client.events
+        .slice(after)
+        .filter((event) =>
+          ['player_spoke', 'npc_reply_chunk', 'npc_replied', 'audio_start'].includes(
+            String(event['type']),
+          ),
+        ),
+    ).toEqual([]);
+    client.send({
+      type: 'speak_npc',
+      npc: 'sentinelle',
+      action: 'presentation',
+    });
+    expect(await client.wait('npc_replied', after)).toMatchObject({
+      npc: 'La Sentinelle',
+      text: 'Je m’appelle La Sentinelle.',
+    });
+    expect(client.events.some((event) => event['type'] === 'player_spoke')).toBe(false);
+  });
+  it.each([
+    { action: 'presentation', text: 'Je m’appelle Mordrek.' },
+    { action: 'fill_wait', text: 'Attendons ici.' },
+    { action: 'greeting', text: 'Bonjour, voyageurs.' },
+  ])('distinguishes $action without a tone', async ({ action, text }) => {
+    const client = await connect();
+    client.send({ type: 'speak_npc', npc: 'mordrek', action });
+    expect((await client.wait('npc_replied'))['text']).toContain(text);
+    client.socket.close();
+  });
+  it.each(['joyeux', 'unknown', null, { obsolete: true }])(
+    'ignores the obsolete tone field: %j',
+    async (attitude) => {
+      const client = await connect();
+      client.send({ type: 'speak_npc', npc: 'mordrek', action: 'greeting', attitude });
+      expect((await client.wait('npc_replied'))['text']).toBe('Bonjour, voyageurs.');
+      client.socket.close();
+    },
+  );
+  it('rejects unknown or missing actions without generating a reply', async () => {
+    const client = await connect();
+    for (const cue of [
+      { action: 'unknown', attitude: 'joyeux' },
+      { action: 'constructor', attitude: 'joyeux' },
+      { attitude: 'joyeux' },
+    ]) {
+      const after = client.events.length;
+      client.send({ type: 'speak_npc', npc: 'mordrek', ...cue });
+      await client.wait('error', after);
+    }
+    expect(client.events.some((event) => event['type'] === 'npc_replied')).toBe(false);
+  });
   it.each(['approved', 'rejected'])(
     'holds the reply until a %s decision is received',
     async (decision) => {

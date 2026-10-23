@@ -1,0 +1,11 @@
+Generated with the built-in image_gen tool.
+Final asset: src/assets/app-icon.png
+
+Use case: logo-brand.
+Asset type: finished square app icon for ÉCHO, a French fantasy role-playing companion app.
+Primary request: rework the idea of a mysterious hooded character's head into a polished, distinctive app emblem, legible at 32 pixels.
+Subject: a single front-facing hooded head, slightly pointed hood, deep shadow obscuring the face, two small calm warm-gold eyes. A compact, elegant silhouette with just a hint of shoulder folds at the bottom. Mysterious and welcoming, a storyteller rather than a menacing assassin.
+Style/medium: premium graphic emblem, strong clean vector-like shapes, restrained flat shading, beautiful deliberate negative space. Broad shapes, few details.
+Color palette: existing app colors forest green #25382e, near black #121b18, muted warm gold #c8ac75. Gold edge accents on the outer hood, dark green hood fabric, shadow-black face.
+Composition: one centered icon fills roughly 80 percent of a 1024 by 1024 square canvas, generous safe margins, fully opaque uniform near-black green #101916 background extending to all four square corners. Balanced silhouette. Supply the icon itself as a flat image.
+Constraints: no text, letters, watermark, surrounding objects, weapons, skull, extra symbols, decorative border, mockup, perspective, multiple variants, rounded outer tile corners or white margin. Avoid complex textures, fine ornamental lines, bright glow or aggressive slanted eyes.

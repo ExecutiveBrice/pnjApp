@@ -42,12 +42,11 @@ const audioInput = process.env['MOCK_AUDIO_INPUT'] === '1';
 const audioOutput = process.env['MOCK_AUDIO_OUTPUT'] === '1';
 const legacy = process.env['MOCK_LEGACY'] === '1';
 const gm = !legacy && process.env['MOCK_GM'] !== '0';
-const speechAttitudes = [
-  { id: 'agacement', label: 'Agacement' },
-  { id: 'amusant', label: 'Amusant' },
-  { id: 'rude', label: 'Rude' },
-  { id: 'complaisant', label: 'Complaisant' },
-];
+const speechReplies = {
+  presentation: (name) => `Je m’appelle ${name}.`,
+  fill_wait: () => 'Nous avons un peu de temps devant nous. Attendons ici.',
+  greeting: () => 'Bonjour, voyageurs.',
+};
 const mockStory = {
   id: 'e'.repeat(32),
   title: 'Le feu de camp · Signal de démonstration',
@@ -115,6 +114,11 @@ server.on('connection', (socket) => {
   let state = 'idle';
   let turn = 0;
   let inputBytes = null;
+  socket.resetCampaign = () => {
+    ++turn;
+    inputBytes = null;
+    state = 'idle';
+  };
   const send = (event) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
   };
@@ -126,12 +130,21 @@ server.on('connection', (socket) => {
     if (gm)
       send({
         type: 'gm_npc_list',
-        npcs: npcs.map((item) => ({ id: item.id, name: item.name, active: item.id === npc.id })),
-        speech_attitudes: speechAttitudes,
+        npcs: npcs.map((item) => ({
+          id: item.id,
+          name: item.name,
+          active: item.id === npc.id,
+          scenario: item.gm_notes?.scenario ?? item.gm_notes?.behavior ?? '',
+          attitude: item.gm_notes?.attitude ?? '',
+          motivation: item.gm_notes?.motivation ?? '',
+          negotiation: item.gm_notes?.leverage ?? '',
+          secret_count: item.gm_notes?.secret_count ?? item.gm_notes?.secrets?.length ?? 0,
+        })),
       });
   };
   const hello = { type: 'hello', protocol: 1, npc: npc.name, state };
-  if (!legacy && npc.gm_notes) hello.gm_notes = npc.gm_notes;
+  const publicNpcs = () => npcs.map(({ id, name }) => ({ id, name }));
+  if (!legacy && !gm && npc.gm_notes) hello.gm_notes = npc.gm_notes;
   if (!legacy)
     hello.capabilities = {
       text_input: true,
@@ -143,7 +156,7 @@ server.on('connection', (socket) => {
       story_generation: false,
     };
   send(hello);
-  if (!legacy) send({ type: 'npc_list', npcs });
+  if (!legacy) send({ type: 'npc_list', npcs: gm ? publicNpcs() : npcs });
   sendSpeechCatalog();
 
   const respond = async (text, resolvedReply, echo = true, speaker = npc.name) => {
@@ -232,25 +245,57 @@ server.on('connection', (socket) => {
       return;
     }
     switch (command.type) {
+      case 'reset_session':
+        if (!gm) {
+          send({ type: 'error', message: 'Réinitialisation réservée au MJ.' });
+          break;
+        }
+        for (const client of server.clients) client.resetCampaign?.();
+        disclosures.clear();
+        resolvedDisclosures.clear();
+        // The mock has no campaign directory; the real PNJ must clean it before this ack.
+        send({ type: 'session_reset' });
+        broadcast({ type: 'secret_disclosure_list', requests: [] });
+        break;
+      case 'get_npc_secrets': {
+        const target = npcs.find((item) => item.id === command.npc);
+        if (!gm || !target) {
+          send({ type: 'error', message: 'Consultation des secrets indisponible.' });
+          break;
+        }
+        send({
+          type: 'gm_npc_secrets',
+          id: target.id,
+          name: target.name,
+          secrets: (target.gm_notes?.secrets ?? []).map((body) => ({
+            body,
+            hint: '',
+            status: 'locked',
+          })),
+        });
+        break;
+      }
       case 'speak_npc': {
         const target = npcs.find((item) => item.id === command.npc);
-        const attitude = speechAttitudes.find((item) => item.id === command.attitude);
-        if (!gm || !target || !attitude || state !== 'idle' || inputBytes !== null) {
+        const reply = Object.hasOwn(speechReplies, command.action)
+          ? speechReplies[command.action]
+          : undefined;
+        if (
+          !gm ||
+          !target ||
+          typeof reply !== 'function' ||
+          state !== 'idle' ||
+          inputBytes !== null
+        ) {
           send({ type: 'error', message: 'Prise de parole indisponible ou invalide.' });
           break;
         }
         if (target.id !== npc.id) {
           npc = target;
-          send({ type: 'npc_switched', npc: npc.name, gm_notes: npc.gm_notes });
+          send({ type: 'npc_switched', npc: npc.name });
           sendSpeechCatalog();
         }
-        const replies = {
-          agacement: 'Encore cette histoire ? Nous avons assez perdu de temps, venez-en au fait.',
-          amusant: 'Avec une équipe pareille, même les ennuis vont demander un jour de congé !',
-          rude: 'Assez bavardé. Dites ce que vous voulez et laissez-moi travailler.',
-          complaisant: 'Bien sûr, prenez votre temps. Je vais faire de mon mieux pour vous aider.',
-        };
-        void respond('', replies[attitude.id], false);
+        void respond('', reply(target.name), false);
         break;
       }
       case 'studio_list':
@@ -268,7 +313,7 @@ server.on('connection', (socket) => {
         break;
       case 'status':
         send({ type: 'status', state });
-        if (!legacy) send({ type: 'npc_list', npcs });
+        if (!legacy) send({ type: 'npc_list', npcs: gm ? publicNpcs() : npcs });
         sendSpeechCatalog();
         if (gm)
           send({
@@ -337,7 +382,7 @@ server.on('connection', (socket) => {
         ++turn;
         inputBytes = null;
         npc = next;
-        send({ type: 'npc_switched', npc: npc.name, gm_notes: npc.gm_notes });
+        send({ type: 'npc_switched', npc: npc.name, ...(!gm ? { gm_notes: npc.gm_notes } : {}) });
         sendSpeechCatalog();
         setState('idle');
         break;

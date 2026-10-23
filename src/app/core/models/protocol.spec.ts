@@ -2,6 +2,96 @@ import { describe, expect, it } from 'vitest';
 import { parseServerEvent } from './protocol';
 
 describe('NPC summaries in the character list', () => {
+  it.each([
+    undefined,
+    null,
+    'obsolete',
+    [null],
+    [{ id: 'joyeux', label: 42 }],
+    [
+      { id: 'joyeux', label: 'Joyeux' },
+      { id: 'joyeux', label: 'Joyeux' },
+    ],
+  ])('ignores obsolete tone fields regardless of their shape: %j', (speech_attitudes) => {
+    const npcs = [{ id: 'guide', name: 'Guide', active: true }];
+    expect(parseServerEvent({ type: 'gm_npc_list', npcs, speech_attitudes })).toEqual({
+      type: 'gm_npc_list',
+      npcs,
+    });
+  });
+
+  it('reads the real server’s flat GM cards and maps negotiation to the displayed leverage', () => {
+    expect(
+      parseServerEvent({
+        type: 'gm_npc_list',
+        npcs: [
+          {
+            id: 'smith',
+            name: 'Smith',
+            active: false,
+            scenario: 'Forge',
+            attitude: 'Méfiant',
+            motivation: 'Protéger sa forge',
+            negotiation: 'Du charbon',
+            secret_count: 2,
+          },
+        ],
+      }),
+    ).toEqual({
+      type: 'gm_npc_list',
+      npcs: [
+        {
+          id: 'smith',
+          name: 'Smith',
+          active: false,
+          gm_notes: {
+            scenario: 'Forge',
+            attitude: 'Méfiant',
+            motivation: 'Protéger sa forge',
+            leverage: 'Du charbon',
+            secret_count: 2,
+          },
+        },
+      ],
+    });
+  });
+
+  it('keeps valid GM card details when optional fields are malformed', () => {
+    expect(
+      parseServerEvent({
+        type: 'gm_npc_list',
+        npcs: [
+          {
+            id: 'smith',
+            name: 'Smith',
+            active: true,
+            scenario: 42,
+            attitude: ' Prudent ',
+            negotiation: {},
+            secret_count: -1,
+          },
+        ],
+      }),
+    ).toMatchObject({ npcs: [{ gm_notes: { attitude: 'Prudent' } }] });
+  });
+
+  it('validates targeted GM secret responses including an empty list', () => {
+    const event = {
+      type: 'gm_npc_secrets',
+      id: 'smith',
+      name: 'Smith',
+      secrets: [{ body: 'Une confidence.', hint: '', status: 'locked' }],
+    };
+    expect(parseServerEvent(event)).toEqual(event);
+    expect(parseServerEvent({ ...event, secrets: [] })).toEqual({ ...event, secrets: [] });
+    for (const secrets of [
+      null,
+      [null],
+      [{ body: 42 }],
+      [{ body: 'Secret', hint: 1, status: 'local' }],
+    ])
+      expect(parseServerEvent({ ...event, secrets })).toBeNull();
+  });
   it('accepts characters with or without a description', () => {
     const event = {
       type: 'npc_list',

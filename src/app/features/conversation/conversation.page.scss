@@ -115,7 +115,7 @@
 .gm-notes select {
   width: 100%;
   min-height: 44px;
-  margin-top: 10px;
+  margin-top: 0;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -130,9 +130,9 @@
   outline-offset: 2px;
 }
 .speech-buttons {
-  margin-top: 20px;
+  margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 .speech-buttons ion-button {
@@ -142,6 +142,7 @@
   --color: var(--gold);
   font-size: 12px;
   letter-spacing: 0;
+  white-space: normal;
 }
 .messages {
   margin-top: 20px;
@@ -320,6 +321,9 @@
   }
 }
 @media (max-width: 420px) {
+  .speech-buttons {
+    grid-template-columns: 1fr;
+  }
   .gm-notes {
     padding: 16px;
   }

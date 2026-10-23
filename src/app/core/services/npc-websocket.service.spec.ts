@@ -75,6 +75,73 @@ describe('NpcWebSocketService', () => {
     expect(ws.connected).toBe(true);
     expect(sockets[0].sent).toContain('{"type":"status"}');
   });
+  it('waits for the PNJ reset ack, ignores stale replies, then deletes every local history', async () => {
+    sockets[0].hello({ secret_approval: true });
+    await store.ready;
+    store.player('À effacer');
+    const clear = vi.spyOn(store, 'clearAll');
+    const reset = ws.resetCampaignSession();
+    expect(sockets[0].sent.at(-1)).toBe('{"type":"reset_session"}');
+    expect(clear).not.toHaveBeenCalled();
+    await expect(ws.resetCampaignSession()).rejects.toThrow('déjà en cours');
+    sockets[0].receive({ type: 'npc_replied', npc: 'Serveur', text: 'Ancienne réponse' });
+    ws.say('Pendant le nettoyage');
+    expect(store.value).toHaveLength(1);
+    const staleMessage = sockets[0].onmessage;
+    sockets[0].receive({ type: 'session_reset' });
+    staleMessage?.({ data: JSON.stringify({ type: 'player_spoke', text: 'Trop tard' }) });
+    await reset;
+    expect(clear).toHaveBeenCalledOnce();
+    expect(store.hasHistory).toBe(false);
+    expect(ws.state).toBe('disconnected');
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(sockets).toHaveLength(1);
+  });
+  it('preserves local history when PNJ rejects reset or the command cannot be sent', async () => {
+    sockets[0].hello();
+    store.player('À conserver');
+    const reset = ws.resetCampaignSession();
+    const rejected = expect(reset).rejects.toThrow('Commande inconnue');
+    sockets[0].receive({ type: 'error', message: 'Commande inconnue' });
+    await rejected;
+    expect(store.value[0].text).toBe('À conserver');
+    vi.spyOn(sockets[0], 'send').mockImplementationOnce(() => {
+      throw new Error('closed');
+    });
+    await expect(ws.resetCampaignSession()).rejects.toThrow('Impossible d’envoyer');
+    expect(store.hasHistory).toBe(true);
+  });
+  it('times out without retrying reset and preserves history when confirmation is lost', async () => {
+    sockets[0].hello();
+    store.player('À conserver');
+    const reset = ws.resetCampaignSession();
+    const rejected = expect(reset).rejects.toThrow('n’a pas confirmé');
+    await vi.advanceTimersByTimeAsync(10000);
+    await rejected;
+    expect(ws.state).toBe('disconnected');
+    expect(store.value[0].text).toBe('À conserver');
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(sockets).toHaveLength(1);
+  });
+  it('rejects reset after connection loss or without a connected server', async () => {
+    await expect(ws.resetCampaignSession()).rejects.toThrow('Connectez-vous');
+    sockets[0].hello();
+    store.player('À conserver');
+    const reset = ws.resetCampaignSession();
+    const rejected = expect(reset).rejects.toThrow('Connexion perdue');
+    sockets[0].close();
+    await rejected;
+    expect(store.hasHistory).toBe(true);
+  });
+  it('reports partial success when PNJ resets but local deletion fails', async () => {
+    sockets[0].hello();
+    vi.spyOn(store, 'clearAll').mockRejectedValue(new Error('storage'));
+    const reset = ws.resetCampaignSession();
+    const rejected = expect(reset).rejects.toThrow('Session réinitialisée côté PNJ');
+    sockets[0].receive({ type: 'session_reset' });
+    await rejected;
+    expect(ws.state).toBe('disconnected');
+  });
   it('uses legacy capability defaults and restores NPC state', () => {
     let name = '';
     let state: NpcState = 'idle';
@@ -138,61 +205,73 @@ describe('NpcWebSocketService', () => {
       { id: 'foret/guide', name: 'Guide', active: false },
     ],
     speech_attitudes: [
-      { id: 'agacement', label: 'Agacement' },
-      { id: 'amusant', label: 'Amusant' },
-      { id: 'rude', label: 'Rude' },
-      { id: 'complaisant', label: 'Complaisant' },
+      { id: 'hargneux', label: 'Hargneux' },
+      { id: 'humoriste', label: 'Humoriste' },
+      { id: 'presse', label: 'Pressé' },
+      { id: 'joyeux', label: 'Joyeux' },
     ],
   };
-  it.each(['agacement', 'amusant', 'rude', 'complaisant'])(
-    'sends the exact NPC ID and %s cue without adding a player turn or switching first',
-    (attitude) => {
-      sockets[0].hello({ secret_approval: true, text_input: false });
-      sockets[0].receive(speechCatalog);
-      expect(ws.speakNpc('foret/guide', attitude)).toBe(true);
-      expect(sockets[0].sent).toEqual([
-        '{"type":"status"}',
-        JSON.stringify({ type: 'speak_npc', npc: 'foret/guide', attitude }),
-      ]);
-      expect(store.value).toEqual([]);
-      sockets[0].receive({ type: 'npc_switched', npc: 'Guide' });
-      sockets[0].receive({ type: 'state', state: 'processing' });
-      sockets[0].receive({ type: 'npc_replied', npc: 'Guide', text: 'Bonjour !' });
-      expect(store.current?.npc).toBe('Guide');
-      expect(store.value.filter((message) => message.speaker === 'player')).toEqual([]);
-      expect(store.value.at(-1)?.text).toBe('Bonjour !');
-    },
-  );
-  it('requires authorized GM catalog targets and attitudes, including on legacy connections', () => {
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+  it('sends the exact NPC ID without a tone, player turn or prior switch', () => {
+    sockets[0].hello({ secret_approval: true, text_input: false });
+    sockets[0].receive(speechCatalog);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
+    expect(sockets[0].sent).toEqual([
+      '{"type":"status"}',
+      JSON.stringify({ type: 'speak_npc', npc: 'foret/guide', action: 'greeting' }),
+    ]);
+    expect(store.value).toEqual([]);
+    sockets[0].receive({ type: 'npc_switched', npc: 'Guide' });
+    sockets[0].receive({ type: 'state', state: 'processing' });
+    sockets[0].receive({ type: 'npc_replied', npc: 'Guide', text: 'Bonjour !' });
+    expect(store.current?.npc).toBe('Guide');
+    expect(store.value.filter((message) => message.speaker === 'player')).toEqual([]);
+    expect(store.value.at(-1)?.text).toBe('Bonjour !');
+  });
+  it('requires authorized GM catalog targets and valid actions, including on legacy connections', () => {
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     sockets[0].hello();
     const catalog = vi.fn();
     ws.speechCatalog$.subscribe(catalog);
     sockets[0].receive(speechCatalog);
     expect(catalog).toHaveBeenCalledTimes(1);
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     ws.connect('ws://gm:8766/ws');
     sockets[1].hello({ secret_approval: true });
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     sockets[1].receive(speechCatalog);
-    expect(ws.speakNpc('Guide', 'rude')).toBe(false);
-    expect(ws.speakNpc('foret/guide', 'unknown')).toBe(false);
+    expect(ws.speakNpc('Guide', 'greeting')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'unknown' as never)).toBe(false);
     expect(sockets[1].sent).toEqual(['{"type":"status"}']);
   });
+  it.each(['presentation', 'fill_wait', 'greeting'] as const)(
+    'sends the %s action without a tone',
+    (action) => {
+      sockets[0].hello({ secret_approval: true });
+      sockets[0].receive(speechCatalog);
+      expect(ws.speakNpc('foret/guide', action)).toBe(true);
+      expect(sockets[0].sent.at(-1)).toBe(
+        JSON.stringify({
+          type: 'speak_npc',
+          npc: 'foret/guide',
+          action,
+        }),
+      );
+    },
+  );
   it('locks double taps immediately and unlocks on server states, status and errors', () => {
     sockets[0].hello({ secret_approval: true });
     sockets[0].receive(speechCatalog);
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(true);
-    expect(ws.speakNpc('village/guide', 'amusant')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
+    expect(ws.speakNpc('village/guide', 'greeting')).toBe(false);
     sockets[0].receive({ type: 'error', message: 'NPC speech cue rejected' });
-    expect(ws.speakNpc('village/guide', 'amusant')).toBe(true);
+    expect(ws.speakNpc('village/guide', 'greeting')).toBe(true);
     for (const state of ['processing', 'recording', 'speaking']) {
       sockets[0].receive({ type: 'state', state });
-      expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+      expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     }
     sockets[0].receive({ type: 'status', state: 'idle', npc: 'Serveur' });
     expect(ws.currentNpcState).toBe('idle');
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(true);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
   });
   it('clears GM lists and pending cues on reconnection and releases failed sends', () => {
     sockets[0].hello({ secret_approval: true });
@@ -202,9 +281,9 @@ describe('NpcWebSocketService', () => {
     vi.spyOn(sockets[0], 'send').mockImplementationOnce(() => {
       throw new Error('network');
     });
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     expect(pending).toHaveBeenLastCalledWith(false);
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(true);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
     expect(pending).toHaveBeenLastCalledWith(true);
     sockets[0].close();
     expect(pending).toHaveBeenLastCalledWith(false);
@@ -213,30 +292,27 @@ describe('NpcWebSocketService', () => {
     expect(catalog).toHaveBeenLastCalledWith({
       type: 'gm_npc_list',
       npcs: [],
-      speech_attitudes: [],
     });
     vi.advanceTimersByTime(1000);
     sockets[1].hello({ secret_approval: true });
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(false);
     sockets[1].receive(speechCatalog);
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(true);
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
   });
-  it('ignores malformed catalogs and supports older GM catalogs with no speech buttons', () => {
+  it('ignores malformed NPC catalogs and accepts a catalog without tones', () => {
     sockets[0].hello({ secret_approval: true });
     const catalog = vi.fn();
     ws.speechCatalog$.subscribe(catalog);
     for (const invalid of [
       { ...speechCatalog, npcs: [null] },
       { ...speechCatalog, npcs: [{ id: 'npc', name: 'NPC' }] },
-      { ...speechCatalog, speech_attitudes: [{ id: 'rude', label: 42 }] },
-      { ...speechCatalog, speech_attitudes: [null] },
       { ...speechCatalog, npcs: [speechCatalog.npcs[0], speechCatalog.npcs[0]] },
     ])
       sockets[0].receive(invalid);
     expect(catalog).toHaveBeenCalledTimes(1);
     sockets[0].receive({ type: 'gm_npc_list', npcs: speechCatalog.npcs });
-    expect(catalog).toHaveBeenLastCalledWith({ ...speechCatalog, speech_attitudes: [] });
-    expect(ws.speakNpc('foret/guide', 'rude')).toBe(false);
+    expect(catalog).toHaveBeenLastCalledWith({ type: 'gm_npc_list', npcs: speechCatalog.npcs });
+    expect(ws.speakNpc('foret/guide', 'greeting')).toBe(true);
     expect(ws.connected).toBe(true);
   });
   it('blocks commands hidden by capabilities', () => {
@@ -249,7 +325,7 @@ describe('NpcWebSocketService', () => {
   it('sends switch_npc and applies switch and npc_list', () => {
     sockets[0].hello({ npc_switch: true });
     ws.switchNpc('guide');
-    expect(sockets[0].sent).toContain('{"type":"switch_npc","npc":"guide"}');
+    expect(sockets[0].sent).toContain('{"type":"switch_npc","npc":"guide","silent":true}');
     sockets[0].receive({ type: 'npc_reply_chunk', npc: 'Serveur', text: 'Début' });
     sockets[0].receive({ type: 'npc_switched', npc: 'Guide' });
     let npc = '';
@@ -282,6 +358,95 @@ describe('NpcWebSocketService', () => {
     sockets[0].receive({ type: 'npc_switched', npc: 'Serveur', gm_notes: {} });
     expect(store.current?.gmNotes).toEqual({});
   });
+  it('uses real GM cards after player-safe lists, refreshes them and retains them offline', () => {
+    sockets[0].hello({ secret_approval: true, npc_switch: true });
+    const card = {
+      id: 'serveur',
+      name: 'Serveur',
+      active: true,
+      scenario: 'Auberge',
+      attitude: 'Méfiant',
+      motivation: 'Protéger sa famille',
+      negotiation: 'Une promesse',
+      secret_count: 2,
+    };
+    sockets[0].receive({ ...speechCatalog, npcs: [card] });
+    expect(store.current?.gmNotes).toEqual({
+      scenario: 'Auberge',
+      attitude: 'Méfiant',
+      motivation: 'Protéger sa famille',
+      leverage: 'Une promesse',
+      secret_count: 2,
+    });
+    sockets[0].receive({ type: 'npc_list', npcs: [{ id: 'serveur', name: 'Serveur' }] });
+    expect(store.current?.gmNotes?.leverage).toBe('Une promesse');
+    sockets[0].receive({ ...speechCatalog, npcs: [{ ...card, negotiation: 'Du charbon' }] });
+    ws.disconnect();
+    expect(store.current?.gmNotes?.leverage).toBe('Du charbon');
+  });
+
+  it('inspects inactive NPC secrets by exact ID and keeps late replies on their own card', () => {
+    ws.requestNpcSecrets('foret/guide');
+    expect(sockets[0].sent).toEqual([]);
+    sockets[0].hello({ secret_approval: true });
+    sockets[0].receive({
+      ...speechCatalog,
+      npcs: speechCatalog.npcs.map((npc) => ({
+        ...npc,
+        motivation: npc.id,
+        secret_count: 1,
+      })),
+    });
+    const catalog = vi.fn();
+    ws.speechCatalog$.subscribe(catalog);
+    ws.requestNpcSecrets('unknown');
+    ws.requestNpcSecrets('foret/guide');
+    expect(sockets[0].sent).toEqual([
+      '{"type":"status"}',
+      '{"type":"get_npc_secrets","npc":"foret/guide"}',
+    ]);
+    sockets[0].receive({
+      type: 'gm_npc_secrets',
+      id: 'foret/guide',
+      name: 'Guide',
+      secrets: [{ body: 'Cache une clé.', hint: '', status: 'locked' }],
+    });
+    const cards = catalog.mock.lastCall?.[0].npcs;
+    expect(cards[1].gm_notes).toEqual({
+      motivation: 'foret/guide',
+      secret_count: 1,
+      secrets: ['Cache une clé.'],
+    });
+    expect(cards[0].gm_notes.secrets).toBeUndefined();
+    expect(store.current?.gmNotes).toBeUndefined();
+    sockets[0].receive({ type: 'gm_npc_secrets', id: 'foret/guide', name: 'Guide', secrets: [] });
+    expect(catalog.mock.lastCall?.[0].npcs[1].gm_notes.secrets).toEqual([]);
+  });
+
+  it('persists inspected secrets for the active NPC and ignores GM data on a player connection', () => {
+    sockets[0].hello({ secret_approval: true });
+    const card = { id: 'serveur', name: 'Serveur', active: true, secret_count: 1 };
+    const secrets = {
+      type: 'gm_npc_secrets',
+      id: 'serveur',
+      name: 'Serveur',
+      secrets: [{ body: 'Cache une clé.', hint: '', status: 'locked' }],
+    };
+    sockets[0].receive({ ...speechCatalog, npcs: [card] });
+    sockets[0].receive(secrets);
+    expect(store.current?.gmNotes?.secrets).toEqual(['Cache une clé.']);
+    sockets[0].receive({ ...speechCatalog, npcs: [card] });
+    expect(store.current?.gmNotes?.secrets).toEqual(['Cache une clé.']);
+    ws.disconnect();
+    expect(store.current?.gmNotes?.secrets).toEqual(['Cache une clé.']);
+    ws.connect('ws://player/ws');
+    sockets[1].hello();
+    sockets[1].receive({ ...speechCatalog, npcs: [card] });
+    sockets[1].receive(secrets);
+    ws.requestNpcSecrets('serveur');
+    expect(sockets[1].sent).toEqual(['{"type":"status"}']);
+    expect(store.current?.gmNotes).toBeUndefined();
+  });
   it('accepts secret details without a GM capability and sanitizes malformed entries', () => {
     sockets[0].receive({
       type: 'hello',
@@ -306,10 +471,10 @@ describe('NpcWebSocketService', () => {
       protocol: 1,
       npc: 'Serveur',
       state: 'idle',
-      gm_notes: { behavior: 42, attitude: '  Prudent  ', secret_count: -1 },
+      gm_notes: { behavior: 42, attitude: '  Ppressent  ', secret_count: -1 },
     });
     expect(ws.connected).toBe(true);
-    expect(store.current?.gmNotes).toEqual({ attitude: 'Prudent' });
+    expect(store.current?.gmNotes).toEqual({ attitude: 'Ppressent' });
     for (const secret_count of [1.5, '3', null, Number.MAX_SAFE_INTEGER + 1]) {
       sockets[0].receive({ type: 'npc_switched', npc: 'Serveur', gm_notes: { secret_count } });
       expect(store.current?.gmNotes?.secret_count).toBeUndefined();

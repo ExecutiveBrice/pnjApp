@@ -56,6 +56,7 @@ export interface Npc {
   gm_notes?: NpcGmNotes;
 }
 export interface NpcGmNotes {
+  scenario?: string;
   behavior?: string;
   attitude?: string;
   motivation?: string;
@@ -75,19 +76,24 @@ export interface StateEvent {
   type: 'state' | 'status';
   state: NpcState;
 }
-export interface SpeechAttitude {
-  id: string;
-  label: string;
+export const NPC_SPEECH_ACTIONS = [
+  { id: 'presentation', label: 'Présentation' },
+  { id: 'fill_wait', label: 'Meubler pour attendre' },
+  { id: 'greeting', label: 'Salutation' },
+] as const;
+export type NpcSpeechAction = (typeof NPC_SPEECH_ACTIONS)[number]['id'];
+export interface SpeechNpc extends Npc {
+  active: boolean;
 }
-export interface SpeechNpc {
+export interface GmNpcSecretsEvent {
+  type: 'gm_npc_secrets';
   id: string;
   name: string;
-  active: boolean;
+  secrets: { body: string; hint: string; status: string }[];
 }
 export interface GmNpcListEvent {
   type: 'gm_npc_list';
   npcs: SpeechNpc[];
-  speech_attitudes: SpeechAttitude[];
 }
 export interface PlayerSpokeEvent {
   type: 'player_spoke';
@@ -141,6 +147,7 @@ export type SecretDisclosureEvent =
   | { type: 'secret_disclosure_list'; requests: SecretDisclosureRequest[] }
   | { type: 'secret_disclosure_resolved'; request_id: string; decision: DisclosureDecision };
 export type ServerEvent =
+  | { type: 'session_reset' }
   | HelloEvent
   | StateEvent
   | PlayerSpokeEvent
@@ -152,13 +159,16 @@ export type ServerEvent =
   | AudioEndEvent
   | StudioCatalogEvent
   | GmNpcListEvent
+  | GmNpcSecretsEvent
   | NpcListEvent
   | SecretDisclosureEvent;
 export type ClientCommand =
+  | { type: 'reset_session' }
   | { type: 'studio_list' }
   | { type: 'say'; text: string }
-  | { type: 'speak_npc'; npc: string; attitude: string }
-  | { type: 'switch_npc'; npc: string }
+  | { type: 'speak_npc'; npc: string; action: NpcSpeechAction }
+  | { type: 'get_npc_secrets'; npc: string }
+  | { type: 'switch_npc'; npc: string; silent: true }
   | { type: 'stop_speaking' }
   | { type: 'status' }
   | { type: 'resolve_secret_disclosure'; request_id: string; decision: DisclosureDecision }
@@ -188,7 +198,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export function parseNpcGmNotes(value: unknown): NpcGmNotes | undefined {
   if (!isRecord(value)) return undefined;
   const notes: NpcGmNotes = {};
-  for (const key of ['behavior', 'attitude', 'motivation', 'leverage'] as const) {
+  for (const key of ['scenario', 'behavior', 'attitude', 'motivation', 'leverage'] as const) {
     const text = value[key];
     if (typeof text === 'string' && text.trim()) notes[key] = text.trim();
   }
@@ -220,6 +230,8 @@ export function parseServerEvent(value: unknown): ServerEvent | null {
   const text = typeof value['text'] === 'string';
   const npc = typeof value['npc'] === 'string';
   switch (value['type']) {
+    case 'session_reset':
+      return { type: 'session_reset' };
     case 'hello': {
       const caps = value['capabilities'];
       if (
@@ -257,32 +269,41 @@ export function parseServerEvent(value: unknown): ServerEvent | null {
         )
       )
         return null;
-      const attitudes = value['speech_attitudes'] ?? [];
-      if (
-        !Array.isArray(attitudes) ||
-        !attitudes.every(
-          (item) =>
-            isRecord(item) &&
-            typeof item['id'] === 'string' &&
-            item['id'].trim() &&
-            typeof item['label'] === 'string' &&
-            item['label'].trim(),
-        )
-      )
-        return null;
       const npcs = value['npcs'] as SpeechNpc[];
-      const speechAttitudes = attitudes as SpeechAttitude[];
-      if (
-        new Set(npcs.map((item) => item.id)).size !== npcs.length ||
-        new Set(speechAttitudes.map((item) => item.id)).size !== speechAttitudes.length
-      )
-        return null;
+      if (new Set(npcs.map((item) => item.id)).size !== npcs.length) return null;
       return {
         type: 'gm_npc_list',
-        npcs: npcs.map(({ id, name, active }) => ({ id, name, active })),
-        speech_attitudes: speechAttitudes.map(({ id, label }) => ({ id, label })),
+        npcs: (value['npcs'] as Record<string, unknown>[]).map((item) => {
+          // The NPC server sends flat GM cards; older mocks send nested gm_notes.
+          const flatNotes = parseNpcGmNotes({ ...item, leverage: item['negotiation'] });
+          const nestedNotes = parseNpcGmNotes(item['gm_notes']);
+          return {
+            id: item['id'] as string,
+            name: item['name'] as string,
+            active: item['active'] as boolean,
+            ...(typeof item['description'] === 'string'
+              ? { description: item['description'] }
+              : {}),
+            ...(Object.keys(flatNotes ?? {}).length || nestedNotes !== undefined
+              ? { gm_notes: { ...flatNotes, ...nestedNotes } }
+              : {}),
+          };
+        }),
       };
     }
+    case 'gm_npc_secrets':
+      return nonEmptyString(value['id']) &&
+        nonEmptyString(value['name']) &&
+        Array.isArray(value['secrets']) &&
+        value['secrets'].every(
+          (secret) =>
+            isRecord(secret) &&
+            nonEmptyString(secret['body']) &&
+            typeof secret['hint'] === 'string' &&
+            typeof secret['status'] === 'string',
+        )
+        ? (value as unknown as GmNpcSecretsEvent)
+        : null;
     case 'player_spoke':
       return text ? (value as unknown as PlayerSpokeEvent) : null;
     case 'npc_reply_chunk':

@@ -30,7 +30,12 @@ import { PushToTalkComponent } from '../../shared/components/push-to-talk.compon
 import { ConnectionStatusComponent } from '../../shared/components/connection-status.component';
 import { NpcPickerComponent } from './npc-picker.component';
 import { ConversationStore } from '../../core/services/conversation.store';
-import { ConversationMessage, SpeechNpc } from '../../core/models/protocol';
+import {
+  ConversationMessage,
+  SpeechNpc,
+  NpcSpeechAction,
+  NPC_SPEECH_ACTIONS,
+} from '../../core/models/protocol';
 import { SecretApprovalsComponent } from './secret-approvals.component';
 
 @Component({
@@ -92,10 +97,22 @@ export class ConversationPage {
   readonly converting = signal(false);
   readonly requestingMicrophone = signal(false);
   readonly speechCatalog = toSignal(this.ws.speechCatalog$, {
-    initialValue: { type: 'gm_npc_list' as const, npcs: [], speech_attitudes: [] },
+    initialValue: { type: 'gm_npc_list' as const, npcs: [] },
   });
   readonly speechPending = toSignal(this.ws.speechPending$, { initialValue: false });
   readonly speechTargetId = signal('');
+  readonly speechActions = NPC_SPEECH_ACTIONS;
+  readonly speechNpcGroups = computed(() => {
+    const groups = new Map<string, SpeechNpc[]>();
+    for (const npc of this.speechCatalog().npcs) {
+      const separator = npc.id.lastIndexOf('/');
+      const zone = separator > 0 ? npc.id.slice(0, separator) : '';
+      const group = groups.get(zone);
+      if (group) group.push(npc);
+      else groups.set(zone, [npc]);
+    }
+    return Array.from(groups, ([zone, npcs]) => ({ zone, label: zone || 'Sans zone', npcs }));
+  });
   readonly speechTarget = computed<SpeechNpc | undefined>(() => {
     const npcs = this.speechCatalog().npcs;
     return (
@@ -105,18 +122,25 @@ export class ConversationPage {
     );
   });
   readonly hasSpeechControls = computed(
-    () =>
-      !!this.capabilities().secret_approval &&
-      !!this.speechCatalog().npcs.length &&
-      !!this.speechCatalog().speech_attitudes.length,
+    () => !!this.capabilities().secret_approval && !!this.speechCatalog().npcs.length,
   );
   readonly displayedNpc = computed(() =>
     this.hasSpeechControls() ? (this.speechTarget()?.name ?? this.npc()) : this.npcName(),
   );
+  readonly displayedCharacter = computed(() => {
+    const target = this.hasSpeechControls() ? this.speechTarget() : undefined;
+    return target
+      ? { ...this.npcs().find((npc) => npc.id === target.id), ...target }
+      : this.selectedNpc();
+  });
   readonly gmNotes = computed(() => {
     const target = this.hasSpeechControls() ? this.speechTarget() : undefined;
-    if (!target || target.active) return this.activeConversation()?.gmNotes;
-    return this.npcs().find((npc) => npc.id === target.id)?.gm_notes;
+    if (!target) return this.activeConversation()?.gmNotes;
+    return (
+      target.gm_notes ??
+      (target.active ? this.activeConversation()?.gmNotes : undefined) ??
+      this.displayedCharacter()?.gm_notes
+    );
   });
   readonly secretCount = computed(
     () => this.gmNotes()?.secret_count ?? this.gmNotes()?.secrets?.length,
@@ -130,7 +154,13 @@ export class ConversationPage {
   );
   readonly secretsOpen = computed(() => this.expandedSecrets() === this.characterKey());
   toggleSecrets(): void {
-    this.expandedSecrets.set(this.secretsOpen() ? null : this.characterKey());
+    const opening = !this.secretsOpen();
+    this.expandedSecrets.set(opening ? this.characterKey() : null);
+    const target = this.hasSpeechControls()
+      ? this.speechTarget()
+      : this.speechCatalog().npcs.find((npc) => npc.active);
+    if (opening && this.connection() === 'connected' && target)
+      this.ws.requestNpcSecrets(target.id);
   }
   readonly speechDisabled = computed(
     () =>
@@ -220,11 +250,11 @@ export class ConversationPage {
       this.ws.switchNpc(id);
     }
   }
-  speakNpc(attitude: string): void {
+  speakNpc(action: NpcSpeechAction): void {
     const target = this.speechTarget();
     if (this.speechDisabled() || !target) return;
     void this.audio.unlock().catch(() => undefined);
-    this.ws.speakNpc(target.id, attitude);
+    this.ws.speakNpc(target.id, action);
   }
   async startRecording(): Promise<void> {
     const gesture = ++this.gesture;

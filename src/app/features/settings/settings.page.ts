@@ -11,12 +11,14 @@ import {
   IonToggle,
   IonToolbar,
   ToastController,
+  AlertController,
 } from '@ionic/angular';
 import { addIcons } from 'ionicons';
 import { arrowBackOutline } from 'ionicons/icons';
 import { AppSettings, SettingsService } from '../../core/services/settings.service';
 import { NpcWebSocketService } from '../../core/services/npc-websocket.service';
 import { AudioPlaybackService } from '../../core/services/audio-playback.service';
+import { MicrophoneService } from '../../core/services/microphone.service';
 import { buildEndpoint } from '../../shared/utils/endpoint';
 @Component({
   selector: 'app-settings',
@@ -120,15 +122,52 @@ export class SettingsPage {
   private readonly settings = inject(SettingsService);
   readonly ws = inject(NpcWebSocketService);
   private readonly audio = inject(AudioPlaybackService);
+  private readonly microphone = inject(MicrophoneService);
+  private readonly alerts = inject(AlertController);
   private readonly router = inject(Router);
   private readonly toast = inject(ToastController);
   form: AppSettings = { ...this.settings.value };
   error = '';
+  resetting = false;
+  resetError = '';
   constructor() {
     addIcons({ arrowBackOutline });
   }
   ionViewWillEnter(): void {
     this.form = { ...this.settings.value };
+  }
+  async confirmSessionReset(): Promise<void> {
+    if (this.resetting || !this.ws.connected) return;
+    this.resetting = true;
+    this.resetError = '';
+    try {
+      const alert = await this.alerts.create({
+        header: 'Réinitialiser la session ?',
+        message:
+          'Tous les échanges et enregistrements locaux seront supprimés pour tous les PNJ et serveurs. L’application PNJ devra vider le dossier session de la campagne active. Cette action est irréversible.',
+        buttons: [
+          { text: 'Annuler', role: 'cancel' },
+          { text: 'Réinitialiser', role: 'destructive' },
+        ],
+      });
+      await alert.present();
+      const result = await alert.onDidDismiss();
+      if (result.role !== 'destructive') return;
+      this.audio.stop();
+      this.microphone.cancel();
+      await this.ws.resetCampaignSession();
+      await this.router.navigateByUrl('/connection');
+      const toast = await this.toast.create({
+        message: 'Session réinitialisée. Historique local supprimé.',
+        duration: 3000,
+        position: 'bottom',
+      });
+      await toast.present();
+    } catch (error: unknown) {
+      this.resetError = error instanceof Error ? error.message : 'La réinitialisation a échoué.';
+    } finally {
+      this.resetting = false;
+    }
   }
   save(): void {
     try {

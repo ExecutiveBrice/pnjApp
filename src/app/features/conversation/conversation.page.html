@@ -3,14 +3,11 @@
     @if (reviewingDisclosures() || pendingDisclosures()) {
     <app-secret-approvals />
     }
-    <section class="gm-notes" aria-labelledby="gm-notes-title">
+    <section class="gm-notes" [attr.aria-label]="'Fiche de ' + displayedNpc()">
       <div class="gm-notes-heading">
         <div class="gm-notes-character">
           <p class="eyebrow">DERRIÈRE L’ÉCRAN</p>
-          <h1 id="gm-notes-title">{{ displayedNpc() }}</h1>
-          @if (selectedNpc()?.description) {
-          <p class="character-summary">{{ selectedNpc()?.description }}</p>
-          } @if (hasSpeechControls()) {
+          @if (hasSpeechControls()) {
           <select
             id="speech-npc"
             aria-label="Personnage"
@@ -18,12 +15,20 @@
             (ngModelChange)="selectSpeechTarget($event)"
             [disabled]="speechDisabled()"
           >
-            @for (target of speechCatalog().npcs; track target.id) {
-            <option [value]="target.id">{{ target.name }} · {{ target.id }}</option>
+            @for (group of speechNpcGroups(); track group.zone) {
+            <optgroup [label]="group.label">
+              @for (target of group.npcs; track target.id) {
+              <option [value]="target.id">{{ target.name }}</option>
+              }
+            </optgroup>
             }
           </select>
-          } @else if ((connection() === 'connected' && capabilities().npc_switch) || (connection()
-          !== 'connected' && histories().length > 0)) {
+          } @else {
+          <h1>{{ displayedNpc() }}</h1>
+          } @if (displayedCharacter()?.description) {
+          <p class="character-summary">{{ displayedCharacter()?.description }}</p>
+          } @if (!hasSpeechControls() && ((connection() === 'connected' &&
+          capabilities().npc_switch) || (connection() !== 'connected' && histories().length > 0))) {
           <ion-button class="switch-button" size="small" fill="clear" (click)="selectNpc()"
             >Changer de personnage<ion-icon slot="end" name="chevron-down-outline"
           /></ion-button>
@@ -64,12 +69,19 @@
         }
       </section>
       <dl class="gm-notes-grid">
+        @if (gmNotes()?.scenario) {
+        <div>
+          <dt>Scénario</dt>
+          <dd>{{ gmNotes()?.scenario }}</dd>
+        </div>
+        } @else {
         <div>
           <dt>Comportement</dt>
           <dd [class.unspecified]="!gmNotes()?.behavior">
             {{ gmNotes()?.behavior || 'Non renseigné' }}
           </dd>
         </div>
+        }
         <div>
           <dt>Attitude envers les PJ</dt>
           <dd [class.unspecified]="!gmNotes()?.attitude">
@@ -91,13 +103,13 @@
       </dl>
       @if (hasSpeechControls()) {
       <div class="speech-buttons" role="group" aria-label="Faire parler le personnage">
-        @for (attitude of speechCatalog().speech_attitudes; track attitude.id) {
+        @for (action of speechActions; track action.id) {
         <ion-button
           fill="outline"
           [disabled]="speechDisabled()"
-          (click)="speakNpc(attitude.id)"
-          [attr.aria-label]="'Faire parler ' + speechTarget()?.name + ' : ' + attitude.label"
-          >{{ attitude.label }}</ion-button
+          (click)="speakNpc(action.id)"
+          [attr.aria-label]="action.label + ' de ' + speechTarget()?.name"
+          >{{ action.label }}</ion-button
         >
         }
       </div>

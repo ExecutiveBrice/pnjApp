@@ -35,7 +35,6 @@ describe('native Android configuration', () => {
       const configure = () =>
         execFileSync(process.execPath, [script], {
           cwd: fixture,
-          env: { ...process.env, NPC_LAN_HOSTS: '192.168.1.152,localhost' },
         });
       configure();
       const manifest = await readFile(path, 'utf8');
@@ -51,8 +50,11 @@ describe('native Android configuration', () => {
         join(fixture, 'android/app/src/debug/res/xml/npc_network_security.xml'),
         'utf8',
       );
-      expect(policy).toContain('192.168.1.152');
-      expect(policy).toContain('<base-config cleartextTrafficPermitted="false" />');
+      expect(policy).toContain('<base-config cleartextTrafficPermitted="true" />');
+      expect(policy).not.toContain('<domain-config');
+      expect(
+        await readFile(join(fixture, 'android/app/src/debug/AndroidManifest.xml'), 'utf8'),
+      ).toContain('android:networkSecurityConfig="@xml/npc_network_security"');
     },
   );
 });

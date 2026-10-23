@@ -5,6 +5,9 @@ import {
 
 export class MemoryHistory extends ConversationHistoryService {
   readonly saved = new Map<string, SavedConversation>();
+  override async clear(): Promise<void> {
+    this.saved.clear();
+  }
   override async load(): Promise<SavedConversation[]> {
     return structuredClone([...this.saved.values()]);
   }

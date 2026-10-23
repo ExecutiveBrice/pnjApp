@@ -9,6 +9,8 @@ import {
   GmNpcListEvent,
   Npc,
   NpcState,
+  NpcSpeechAction,
+  NPC_SPEECH_ACTIONS,
   ServerEvent,
   StudioCatalogEvent,
   DisclosureDecision,
@@ -37,7 +39,6 @@ export class NpcWebSocketService implements OnDestroy {
   private readonly speechCatalog = new BehaviorSubject<GmNpcListEvent>({
     type: 'gm_npc_list',
     npcs: [],
-    speech_attitudes: [],
   });
   private readonly speechPending = new BehaviorSubject(false);
   readonly connectionState$ = this.connection.asObservable();
@@ -60,6 +61,12 @@ export class NpcWebSocketService implements OnDestroy {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private helloTimer?: ReturnType<typeof setTimeout>;
   private audioReceiving = false;
+  private pendingReset?: {
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  private resettingCampaign = false;
   private readonly settingsSubscription;
 
   constructor(
@@ -106,35 +113,76 @@ export class NpcWebSocketService implements OnDestroy {
     this.open(false);
   }
   disconnect(): void {
+    this.rejectReset('Connexion interrompue avant confirmation de la réinitialisation.');
     this.stopped = true;
     this.clearTimers();
     this.releaseSocket();
     this.resetSession();
     this.connection.next('disconnected');
   }
+  async resetCampaignSession(): Promise<void> {
+    if (this.resettingCampaign) throw new Error('Une réinitialisation est déjà en cours.');
+    if (!this.connected)
+      throw new Error('Connectez-vous au serveur PNJ pour réinitialiser la session.');
+    this.resettingCampaign = true;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.pendingReset = {
+          resolve,
+          reject,
+          timer: setTimeout(() => {
+            this.rejectReset(
+              'Le serveur PNJ n’a pas confirmé la réinitialisation. Vérifiez son état avant de réessayer.',
+            );
+            this.disconnect();
+          }, 10000),
+        };
+        if (!this.send({ type: 'reset_session' })) {
+          this.rejectReset('Impossible d’envoyer la commande de réinitialisation au serveur PNJ.');
+        }
+      });
+      try {
+        await this.store.clearAll();
+      } catch {
+        throw new Error(
+          'Session réinitialisée côté PNJ, mais l’historique local n’a pas pu être supprimé. Reconnectez-vous et réessayez.',
+        );
+      }
+    } finally {
+      this.resettingCampaign = false;
+    }
+  }
   say(text: string): void {
     const trimmed = text.trim();
     if (!trimmed || !this.capabilities.value.text_input) return;
     if (this.send({ type: 'say', text: trimmed })) this.store.player(trimmed, true);
   }
-  speakNpc(npc: string, attitude: string): boolean {
+  speakNpc(npc: string, action: NpcSpeechAction): boolean {
     if (
       !this.connected ||
       !this.capabilities.value.secret_approval ||
       this.npcState.value !== 'idle' ||
       this.speechPending.value ||
       !this.speechCatalog.value.npcs.some((item) => item.id === npc) ||
-      !this.speechCatalog.value.speech_attitudes.some((item) => item.id === attitude)
+      !NPC_SPEECH_ACTIONS.some((item) => item.id === action)
     )
       return false;
     this.speechPending.next(true);
-    const sent = this.send({ type: 'speak_npc', npc, attitude });
+    const sent = this.send({ type: 'speak_npc', npc, action });
     if (!sent) this.speechPending.next(false);
     return sent;
   }
   switchNpc(id: string): void {
     if (this.capabilities.value.npc_switch && id.trim())
-      this.send({ type: 'switch_npc', npc: id.trim() });
+      this.send({ type: 'switch_npc', npc: id.trim(), silent: true });
+  }
+  requestNpcSecrets(id: string): void {
+    if (
+      this.connected &&
+      this.capabilities.value.secret_approval &&
+      this.speechCatalog.value.npcs.some((npc) => npc.id === id)
+    )
+      this.send({ type: 'get_npc_secrets', npc: id });
   }
   stopSpeaking(): void {
     this.audioReceiving = false;
@@ -253,9 +301,11 @@ export class NpcWebSocketService implements OnDestroy {
     if (!event) {
       const known = [
         'hello',
+        'session_reset',
         'state',
         'status',
         'gm_npc_list',
+        'gm_npc_secrets',
         'player_spoke',
         'npc_reply_chunk',
         'npc_replied',
@@ -276,6 +326,19 @@ export class NpcWebSocketService implements OnDestroy {
       return;
     }
     logger.debug('WS', `<- ${event.type}`);
+    if (this.pendingReset) {
+      if (event.type === 'session_reset') {
+        const pending = this.pendingReset;
+        this.pendingReset = undefined;
+        clearTimeout(pending.timer);
+        // Detach the old socket before awaiting IndexedDB or accepting more packets.
+        this.disconnect();
+        pending.resolve();
+      } else if (event.type === 'error') {
+        this.rejectReset(event.message);
+      }
+      return;
+    }
     if (event.type === 'hello') {
       if (event.protocol !== 1) {
         this.disconnect();
@@ -315,8 +378,37 @@ export class NpcWebSocketService implements OnDestroy {
         if (event.state === 'idle') this.store.interrupt();
         break;
       case 'gm_npc_list':
-        if (this.capabilities.value.secret_approval) this.speechCatalog.next(event);
+        if (this.capabilities.value.secret_approval) {
+          this.speechCatalog.next({
+            ...event,
+            npcs: event.npcs.map((npc) => {
+              const previous = this.speechCatalog.value.npcs.find((card) => card.id === npc.id);
+              const secrets = previous?.gm_notes?.secrets;
+              return secrets !== undefined &&
+                npc.gm_notes?.secrets === undefined &&
+                npc.gm_notes?.secret_count === previous?.gm_notes?.secret_count
+                ? { ...npc, gm_notes: { ...npc.gm_notes, secrets } }
+                : npc;
+            }),
+          });
+          this.syncGmNotes();
+        }
         break;
+      case 'gm_npc_secrets': {
+        if (!this.capabilities.value.secret_approval) break;
+        const target = this.speechCatalog.value.npcs.find((npc) => npc.id === event.id);
+        if (!target) break;
+        this.speechCatalog.next({
+          ...this.speechCatalog.value,
+          npcs: this.speechCatalog.value.npcs.map((npc) =>
+            npc.id === event.id
+              ? { ...npc, gm_notes: { ...npc.gm_notes, secrets: event.secrets.map((s) => s.body) } }
+              : npc,
+          ),
+        });
+        this.syncGmNotes();
+        break;
+      }
       case 'player_spoke':
         this.store.player(event.text);
         break;
@@ -330,20 +422,13 @@ export class NpcWebSocketService implements OnDestroy {
         this.audioReceiving = false;
         this.audio.next({ type: 'reset' });
         this.store.interrupt();
-        this.store.select(
-          this.endpoint,
-          event.npc,
-          event.gm_notes ?? this.npcs.value.find((npc) => npc.name === event.npc)?.gm_notes,
-        );
+        this.store.select(this.endpoint, event.npc, event.gm_notes ?? this.notesForNpc(event.npc));
         this.npcState.next('idle');
         this.store.system(`Vous parlez maintenant avec ${event.npc}.`);
         break;
       case 'npc_list':
         this.npcs.next(event.npcs);
-        {
-          const notes = event.npcs.find((npc) => npc.name === this.store.current?.npc)?.gm_notes;
-          if (notes !== undefined) this.store.setGmNotes(notes);
-        }
+        this.syncGmNotes();
         break;
       case 'secret_disclosure_requested':
         if (
@@ -414,7 +499,24 @@ export class NpcWebSocketService implements OnDestroy {
         break;
     }
   }
+  private notesForNpc(name: string) {
+    const cards = this.speechCatalog.value.npcs;
+    const matches = cards.filter((npc) => npc.id === name || npc.name === name);
+    const card =
+      cards.find((npc) => npc.id === name) ??
+      matches.find((npc) => npc.active) ??
+      (matches.length === 1 ? matches[0] : undefined);
+    return (
+      card?.gm_notes ??
+      this.npcs.value.find((npc) => npc.id === name || npc.name === name)?.gm_notes
+    );
+  }
+  private syncGmNotes(): void {
+    const notes = this.notesForNpc(this.store.current?.npc ?? '');
+    if (notes !== undefined) this.store.setGmNotes(notes);
+  }
   private send(command: ClientCommand): boolean {
+    if (this.resettingCampaign && command.type !== 'reset_session') return false;
     if (!this.connected || this.socket?.readyState !== 1) {
       this.errors$.next('Connectez-vous au serveur avant d’envoyer un message.');
       return false;
@@ -429,6 +531,7 @@ export class NpcWebSocketService implements OnDestroy {
     }
   }
   private failed(message: string): void {
+    this.rejectReset('Connexion perdue avant confirmation de la réinitialisation.');
     if (this.helloTimer) clearTimeout(this.helloTimer);
     this.helloTimer = undefined;
     this.resetSession();
@@ -444,7 +547,7 @@ export class NpcWebSocketService implements OnDestroy {
   }
   private resetSession(): void {
     this.speechPending.next(false);
-    this.speechCatalog.next({ type: 'gm_npc_list', npcs: [], speech_attitudes: [] });
+    this.speechCatalog.next({ type: 'gm_npc_list', npcs: [] });
     this.audioReceiving = false;
     this.audio.next({ type: 'reset' });
     this.npcState.next('idle');
@@ -455,6 +558,13 @@ export class NpcWebSocketService implements OnDestroy {
     this.disclosures.next([]);
     this.disclosuresSynced.next(false);
     this.store.interrupt();
+  }
+  private rejectReset(message: string): void {
+    const pending = this.pendingReset;
+    if (!pending) return;
+    this.pendingReset = undefined;
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
   }
   private releaseSocket(): void {
     if (!this.socket) return;

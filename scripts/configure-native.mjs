@@ -2,12 +2,6 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 
-const hosts = (process.env['NPC_LAN_HOSTS'] ?? '192.168.1.20,localhost,10.0.2.2')
-  .split(',')
-  .map((value) => value.trim());
-if (hosts.some((host) => !/^[a-zA-Z0-9.:[\]-]+$/.test(host)))
-  throw new Error('NPC_LAN_HOSTS doit contenir des hôtes seuls séparés par des virgules.');
-
 if (existsSync('android/app/src/main/AndroidManifest.xml')) {
   const path = 'android/app/src/main/AndroidManifest.xml';
   let manifest = await readFile(path, 'utf8');
@@ -50,14 +44,13 @@ if (existsSync('android/app/src/main/AndroidManifest.xml')) {
     'android/app/src/debug/res/xml/npc_network_security.xml',
     `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <base-config cleartextTrafficPermitted="false" />
-  <domain-config cleartextTrafficPermitted="true">
-${hosts.map((host) => `    <domain includeSubdomains="false">${host}</domain>`).join('\n')}
-  </domain-config>
+  <base-config cleartextTrafficPermitted="true" />
 </network-security-config>
 `,
   );
-  console.log(`Android : permission micro et exceptions LAN debug pour ${hosts.join(', ')}.`);
+  console.log(
+    'Android : permissions micro et connexions HTTP/WS autorisées vers tous les hôtes en debug.',
+  );
 }
 
 if (existsSync('ios/App/App/Info.plist')) {

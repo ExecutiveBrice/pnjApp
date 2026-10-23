@@ -62,7 +62,13 @@ Format de `mes-pnj.json` : tableau de `{ "id": "identifiant-cote-serveur", "name
 
 ### Repères pour le Maître du Jeu
 
-L’écran commence par un seul encart « Derrière l’écran » : nom du personnage, sélecteur, comportement, attitude envers les PJ, motivation, levier de négociation et nombre de secrets. Les boutons de prise de parole restent sous ces informations, puis viennent directement les transcriptions. La navigation vers les histoires, les réglages et la connexion est accessible en bas de l’écran. Le serveur peut fournir un objet optionnel `gm_notes` dans `hello`, `npc_switched` ou chaque entrée de `npc_list` (également dans les fixtures du mock) :
+L’écran commence par un seul encart « Derrière l’écran » : nom du personnage, sélecteur, scénario (ou comportement), attitude envers les PJ, motivation, levier de négociation et nombre de secrets. Les boutons de prise de parole restent sous ces informations, puis viennent directement les transcriptions. La navigation vers les histoires, les réglages et la connexion est accessible en bas de l’écran.
+
+Le serveur PNJ transmet les fiches MJ dans `gm_npc_list`, uniquement avec `capabilities.secret_approval: true`. Chaque entrée de `npcs` contient `id`, `name`, `active` et les champs facultatifs `scenario`, `attitude`, `motivation`, `negotiation` et `secret_count`. Le client affiche `negotiation` comme levier de négociation. Les messages `hello` et `npc_list` du serveur réel ne contiennent que les informations accessibles aux joueurs ; ils ne suffisent pas à remplir la fiche MJ.
+
+Un appui sur le nombre de secrets envoie `{ "type": "get_npc_secrets", "npc": "identifiant-exact" }`. La réponse `gm_npc_secrets` fournit `id`, `name` et `secrets`, un tableau de `{ "body": "…", "hint": "…", "status": "locked" }`. Le client affiche le corps de chaque secret sur la fiche correspondante, même si un autre PNJ a été sélectionné entre la demande et la réponse. Cette consultation ne fait pas parler le PNJ et n’autorise aucune divulgation. Les secrets déjà consultés restent visibles lors des actualisations de la fiche si leur nombre n’a pas changé ; rouvrir la liste redemande leur contenu au serveur. Le mock reproduit ce format.
+
+Pour les anciens serveurs et les fixtures personnalisées du mock, un objet optionnel `gm_notes` reste pris en charge dans `hello`, `npc_switched` ou chaque entrée de `npc_list` et `gm_npc_list` :
 
 ```json
 {
@@ -79,11 +85,23 @@ Tous les champs sont facultatifs. Le nombre de secrets doit être un entier posi
 
 ### Faire parler un PNJ
 
-Dans l’encart « Derrière l’écran », le sélecteur sous le nom permet au MJ de choisir un personnage, de consulter immédiatement ses informations, puis de déclencher **Agacement**, **Amusant**, **Rude** ou **Complaisant**. Le serveur fournit les personnages et les attitudes disponibles ; l’attitude vaut pour cette seule réplique. Choisir un autre personnage affiche immédiatement ses informations et sélectionne sa conversation si le serveur prend en charge `npc_switch`. La prise de parole se déclenche uniquement avec un bouton. La commande `speak_npc` cible son identifiant exact et laisse le serveur sélectionner le PNJ, sans demander d’accueil supplémentaire ni ajouter de message joueur. Sa réponse et son audio suivent l’historique et la réécoute habituels.
+Dans l’encart « Derrière l’écran », le MJ choisit un personnage puis déclenche une réplique avec **Présentation**, **Meubler pour attendre** ou **Salutation**. Les tons de réplique ont été retirés de l’interface et des commandes mobiles.
 
-Cette zone apparaît uniquement si le `hello` annonce `capabilities.secret_approval: true` et si `gm_npc_list` fournit `npcs` (`id`, `name`, `active`) et `speech_attitudes` (`id`, `label`). Activer l’accès MJ mobile (`mobile.secret_approval`) sur le serveur PNJ pour l’utiliser. Un ancien serveur ou une connexion joueur conserve les commandes habituelles. Les boutons attendent la fin d’une réplique, d’un enregistrement ou de sa conversion ; un verrou immédiat évite les doubles appuis avant la réponse du serveur. Une erreur libère ce verrou et s’affiche dans le Toast habituel. Les listes MJ sont vidées à la déconnexion.
+Changer de PNJ affiche immédiatement sa fiche et envoie `{ "type": "switch_npc", "npc": "identifiant-exact", "silent": true }` si `npc_switch` est activé. Le serveur doit sélectionner sa conversation et confirmer avec `npc_switched`, **sans générer de phrase ni d’audio d’accueil**. Le mode silencieux est utilisé aussi depuis la fenêtre « Changer de personnage ». La prise de parole est réservée à une action explicite : par exemple `{ "type": "speak_npc", "npc": "identifiant-exact", "action": "presentation" }`. Les actions sont `presentation`, `fill_wait` et `greeting`. Le serveur applique l’action pour cette seule réplique, sans accueil supplémentaire ni message joueur. Réponse et audio suivent l’historique et la réécoute habituels.
 
-Le mock propose ces quatre boutons par défaut, y compris avec `MOCK_AUDIO_OUTPUT=1` pour tester le transport audio. `MOCK_GM=0 npm run mock-server` simule une connexion joueur sans ces commandes, et `MOCK_LEGACY=1` garde le comportement ancien.
+Cette zone apparaît si le `hello` annonce `capabilities.secret_approval: true` et si `gm_npc_list` fournit `npcs` (`id`, `name`, `active`). Les trois actions sont définies par le client. L’ancien champ `speech_attitudes` est ignoré à la réception, même mal formé ; aucun ton n’est conservé ni envoyé au serveur. L’attitude envers les PJ dans la fiche personnage reste une information distincte. Activer l’accès MJ mobile (`mobile.secret_approval`) sur le serveur PNJ pour l’utiliser. Les boutons attendent la fin d’une réplique, d’un enregistrement ou de sa conversion ; un verrou immédiat évite les doubles appuis avant la réponse du serveur. Une erreur libère ce verrou et s’affiche dans le Toast habituel. Les listes MJ sont vidées à la déconnexion.
+
+**Le serveur PNJ réel, absent de ce dépôt, doit prendre en charge `silent: true` et `action` sans exiger de ton.** Un ancien serveur qui ignore `silent` peut encore générer un accueil et doit être mis à jour. Le mock implémente la sélection silencieuse et les trois actions, ignore les anciens champs de ton et fonctionne avec `MOCK_AUDIO_OUTPUT=1` pour tester le transport audio. `MOCK_GM=0 npm run mock-server` simule une connexion joueur sans ces commandes, et `MOCK_LEGACY=1` garde le comportement ancien.
+
+Si les trois boutons renvoient `NPC speech cue rejected`, vérifier la version du **serveur Python** : il doit accepter une commande sans `attitude`, ignorer les anciens champs de ton et transmettre uniquement `action` à la génération. **Redémarrer le serveur** après sa mise à jour et reconnecter l’application. Reconstruire uniquement le client ou lancer le mock ne met pas à jour le serveur réel.
+
+### Réinitialiser la session
+
+Dans **Réglages → Session**, le bouton **Réinitialiser la session** demande une confirmation. Une connexion au serveur PNJ est nécessaire. Le client envoie `{ "type": "reset_session" }` sur la connexion courante, attend `{ "type": "session_reset" }`, puis se déconnecte et supprime tout l’historique local de conversations : échanges, enregistrements PCM et fiches MJ mises en cache, pour tous les PNJ et serveurs. Les préférences et la bibliothèque d’histoires téléchargées sont conservées.
+
+**Contrat à implémenter dans le serveur PNJ réel (absent de ce dépôt)** : autoriser cette commande pour le MJ, arrêter les générations et flux audio de la campagne active, annuler les demandes de divulgation, réinitialiser les conversations et caches en mémoire, puis vider le contenu du dossier `session` de cette campagne uniquement. Le serveur détermine ce dossier à partir de sa campagne active ; le client ne transmet aucun chemin. Envoyer `session_reset` uniquement après réussite complète du nettoyage. En cas d’échec ou de commande non prise en charge, renvoyer `{ "type": "error", "message": "…" }`.
+
+Sans confirmation sous 10 secondes, le client ferme la connexion, signale que le résultat côté PNJ est inconnu et conserve l’historique local. Il ne renvoie jamais automatiquement la commande. Une erreur du serveur conserve également l’historique local. Le mock implémente la commande, annule les réponses en cours et efface les décisions de secrets en mémoire ; il n’a pas de dossier de campagne sur disque.
 
 ## Build et vérifications
 
@@ -103,8 +121,7 @@ Installer Android Studio et les SDK/JDK requis par Capacitor 8. Le dépôt ne co
 npx cap add android
 npm run build
 npx cap sync android
-# Remplacer l’adresse par l’IP du PC exécutant npc
-NPC_LAN_HOSTS=192.168.1.20,localhost,10.0.2.2 npm run native:configure
+npm run native:configure
 # Autorise le contenu ws:// depuis l’origine https://localhost de la WebView
 NPC_LAN_DEV=1 npx cap sync android
 npx cap open android
@@ -116,11 +133,11 @@ Lancer ensuite une variante **debug** sur l’appareil ou l’émulateur.
 
 - `android.permission.RECORD_AUDIO` et `android.permission.MODIFY_AUDIO_SETTINGS` dans `android/app/src/main/AndroidManifest.xml`. Capacitor exige les deux pour autoriser la capture dans la WebView. Seule `RECORD_AUDIO` déclenche une demande à l’utilisateur, au moment de `getUserMedia`.
 - `android/app/src/debug/AndroidManifest.xml`, qui référence `@xml/npc_network_security`.
-- `android/app/src/debug/res/xml/npc_network_security.xml` : politique de base interdisant le cleartext, avec exceptions **uniquement pour les hôtes fournis** par `NPC_LAN_HOSTS`. Aucun joker ni exception globale. Rerun la commande si l’IP du PC change. Une politique debug préexistante différente n’est pas écrasée : fusionner les `domain-config` manuellement.
+- `android/app/src/debug/res/xml/npc_network_security.xml` : `<base-config cleartextTrafficPermitted="true" />` autorise les connexions HTTP/WS vers **toutes les IP et tous les hôtes** en debug pour le développement local. Aucune liste `NPC_LAN_HOSTS` n’est nécessaire, même si l’IP du PC change. Une politique debug préexistante différente n’est pas écrasée : fusionner la configuration manuellement.
 
-`NPC_LAN_DEV=1` active `android.allowMixedContent` dans la configuration copiée par `cap sync`. C’est nécessaire car les assets embarqués gardent une origine HTTPS, compatible microphone, tandis que le serveur LAN utilise `ws://`. La politique réseau Android reste limitée aux hôtes listés et à la variante debug. `server.cleartext` et les certificats TLS ne sont pas modifiés.
+`NPC_LAN_DEV=1` active `android.allowMixedContent` dans la configuration copiée par `cap sync`. C’est nécessaire car les assets embarqués gardent une origine HTTPS, compatible microphone, tandis que le serveur LAN utilise `ws://`. La politique réseau Android autorise tous les hôtes dans la variante debug. `server.cleartext` et les certificats TLS ne sont pas modifiés.
 
-Pour une distribution/release, utiliser un serveur **wss:// avec certificat valide** puis lancer `npx cap sync android` **sans** `NPC_LAN_DEV`. La politique debug n’est pas incluse dans une release. La configuration ne permet pas un `ws://` arbitraire sur tous les réseaux.
+Pour une distribution/release, utiliser un serveur **wss:// avec certificat valide** puis lancer `npx cap sync android` **sans** `NPC_LAN_DEV`. La politique debug autorisant tous les hôtes n’est pas incluse dans une release.
 
 ## iOS
 

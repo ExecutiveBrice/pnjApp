@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'fr.pnj.echo',
-  appName: 'PNJ Écho',
+  appName: 'PNJ',
   webDir: 'www',
   // Local assets retain a secure origin for getUserMedia. LAN exceptions are
   // applied explicitly to generated native projects by native:configure.

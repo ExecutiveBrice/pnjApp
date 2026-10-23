@@ -8,6 +8,44 @@ const createStore = (): ConversationStore => {
   return store;
 };
 describe('ConversationStore', () => {
+  it('deletes every history and PCM after draining an in-flight write', async () => {
+    const history = new MemoryHistory();
+    const store = new ConversationStore(history);
+    await store.ready;
+    let finishSave!: () => void;
+    const saving = new Promise<void>((resolve) => (finishSave = resolve));
+    vi.spyOn(history, 'save').mockImplementation(async (conversation) => {
+      await saving;
+      history.saved.set(conversation.key, structuredClone(conversation));
+    });
+    store.select('ws://table/ws', 'Guide', { secrets: ['Une clé cachée'] });
+    store.playerRecording(new ArrayBuffer(4));
+    store.select('ws://other/ws', 'Sentinelle');
+    store.player('Autre serveur');
+    await vi.waitFor(() => expect(history.save).toHaveBeenCalled());
+    const cleared = store.clearAll();
+    finishSave();
+    await cleared;
+    expect(store.current).toBeUndefined();
+    expect(store.value).toEqual([]);
+    expect(store.hasHistory).toBe(false);
+    expect(history.saved.size).toBe(0);
+    const restored = new ConversationStore(history);
+    await restored.ready;
+    expect(restored.hasHistory).toBe(false);
+  });
+  it('waits for history restoration before clearing and reports a failed deletion', async () => {
+    const history = new MemoryHistory();
+    let restore!: (value: Awaited<ReturnType<MemoryHistory['load']>>) => void;
+    vi.spyOn(history, 'load').mockReturnValue(new Promise((resolve) => (restore = resolve)));
+    const store = new ConversationStore(history);
+    const cleared = store.clearAll();
+    restore([{ key: 'old', server: 'ws://table/ws', npc: 'Guide', updatedAt: 1, messages: [] }]);
+    await cleared;
+    expect(store.hasHistory).toBe(false);
+    vi.spyOn(history, 'clear').mockRejectedValue(new Error('Stockage indisponible'));
+    await expect(store.clearAll()).rejects.toThrow('Stockage indisponible');
+  });
   it('persists GM notes without messages, isolates servers and restores them offline', async () => {
     const history = new MemoryHistory();
     const store = new ConversationStore(history);
